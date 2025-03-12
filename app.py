@@ -20,16 +20,29 @@ logging.basicConfig(level=logging.INFO)
 def analyze_page(url):
     """
     Analyse une page web et retourne :
-     - Les entêtes H1 et H2
-     - Le nombre de mots
-     - Le nombre de liens internes / externes
-     - Les médias (images, vidéos, audios, iframes embed)
-     - Les données structurées JSON-LD (uniquement le type)
+     - page_title (balise <title>)
+     - meta_description (balise <meta name="description">)
+     - headers (H1, H2)
+     - word_count
+     - internal_links, external_links
+     - media
+     - structured_data (liste des @type des JSON-LD)
     """
     try:
-        response = requests.get(url, timeout=10)
-        time.sleep(1)  # On laisse 1s pour éviter les éventuels retours 403 en cascade
-        soup = BeautifulSoup(response.text, 'html.parser')
+        resp = requests.get(url, timeout=10)
+        time.sleep(1)  # On attend un peu (si 403 ou redirect)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # --- Titre de la page
+        page_title_tag = soup.find('title')
+        page_title = page_title_tag.get_text(strip=True) if page_title_tag else "Aucun <title>"
+
+        # --- Méta description
+        meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+        if meta_desc_tag and meta_desc_tag.get("content"):
+            meta_description = meta_desc_tag["content"].strip()
+        else:
+            meta_description = "Aucune meta description"
 
         # --- H1 / H2
         h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
@@ -42,13 +55,12 @@ def analyze_page(url):
         page_domain = urlparse(url).netloc
         internal_count = 0
         external_count = 0
-
         links = soup.find_all('a', href=True)
         for link in links:
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
-            elif link_domain:  # un domaine différent et non vide
+            elif link_domain:
                 external_count += 1
 
         # --- Médias
@@ -59,17 +71,15 @@ def analyze_page(url):
             'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
         ))
 
-        # --- Données structurées (JSON-LD) : ne renvoyer QUE le @type
+        # --- Données structurées : on ne prend que @type
         structured_data_types = []
         for script_tag in soup.find_all("script", type="application/ld+json"):
             try:
                 json_data = json.loads(script_tag.string)
                 if isinstance(json_data, dict):
-                    # Un seul objet
                     schema_type = json_data.get("@type", "Unknown")
                     structured_data_types.append(schema_type)
                 elif isinstance(json_data, list):
-                    # Plusieurs objets
                     for item in json_data:
                         if isinstance(item, dict):
                             schema_type = item.get("@type", "Unknown")
@@ -79,6 +89,8 @@ def analyze_page(url):
                 continue
 
         return {
+            "page_title": page_title,
+            "meta_description": meta_description,
             "headers": {
                 "H1": h1,
                 "H2": h2s
@@ -96,11 +108,11 @@ def analyze_page(url):
         }
 
     except Exception as e:
-        logging.error(f"Erreur d'analyse: {str(e)}")
+        logging.error(f"Erreur d'analyse de {url}: {str(e)}")
         return {"error": str(e)}
 
 def get_driver():
-    """Configuration optimisée de Selenium pour Chromium"""
+    """Configuration Selenium/Chromium"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -110,7 +122,6 @@ def get_driver():
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
-    # Binaire chromium (vérifie sur Railway)
     chrome_options.binary_location = "/usr/bin/chromium"
 
     service = Service(
@@ -126,11 +137,19 @@ def get_driver():
 def scrape_google_fr():
     """
     Endpoint GET pour scraper Google.fr.
-    Récupère le top 10, PAA (People Also Ask), recherches associées,
-    et pour chaque URL : domain, title, headers, word_count, internal_links,
-    external_links, media, structured_data (@type seulement).
+    Récupère le top 10, PAA, recherches associées,
+    et pour chaque URL : 
+      - google_snippet (ce qui vient de la SERP)
+      - domain
+      - page_title (de la page)
+      - meta_description (de la page)
+      - headers (H1, H2)
+      - word_count
+      - internal_links, external_links
+      - media
+      - structured_data
 
-    Ex : GET /scrape?query=seo+freelance
+    Ex: GET /scrape?query=photogénique
     """
     query = request.args.get('query')
     if not query:
@@ -152,11 +171,11 @@ def scrape_google_fr():
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
-        # Extraire HTML avec BeautifulSoup
+        # Extraire HTML via BeautifulSoup
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
 
-        # --- PAA (People Also Ask)
+        # --- PAA
         paa_questions = []
         paa_spans = soup.select('span.CSkcDe')
         for span in paa_spans:
@@ -175,31 +194,32 @@ def scrape_google_fr():
         # --- Top 10
         search_results = driver.find_elements(By.CSS_SELECTOR, "div.g, div[data-sokoban-container]")[:10]
         results = []
+
         for element in search_results:
             try:
                 link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
-                title_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
-                title = title_elem.text if title_elem else "Sans titre"
+                # "Google snippet" : le titre depuis la SERP
+                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
 
-                # Domaine
                 domain = urlparse(link).netloc
 
-                # Analyse de la page
-                page_analysis = analyze_page(link)
+                # Analyser la page (titre, meta desc, etc.)
+                page_info = analyze_page(link)
 
-                # Structurer la réponse finale pour chaque résultat
                 result_info = {
+                    "google_snippet": google_snippet,
                     "domain": domain,
-                    "title": title,
-                    "headers": page_analysis["headers"],
-                    "word_count": page_analysis["word_count"],
-                    "internal_links": page_analysis["internal_links"],
-                    "external_links": page_analysis["external_links"],
-                    "media": page_analysis["media"],
-                    "structured_data": page_analysis["structured_data"]
+                    "page_title": page_info["page_title"],
+                    "meta_description": page_info["meta_description"],
+                    "headers": page_info["headers"],
+                    "word_count": page_info["word_count"],
+                    "internal_links": page_info["internal_links"],
+                    "external_links": page_info["external_links"],
+                    "media": page_info["media"],
+                    "structured_data": page_info["structured_data"]
                 }
                 results.append(result_info)
-
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
