@@ -15,54 +15,46 @@ import traceback
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-def get_driver():
-    """Configuration Selenium (Chromium headless)"""
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1280x720")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.binary_location = "/usr/bin/chromium"   # Chemin de chromium
-    service = Service("/usr/bin/chromedriver")             # Chemin de chromedriver
-
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(60)
-    return driver
-
 def analyze_page(url):
-    """Analyse la page en HTTP (requests + BeautifulSoup), renvoie quelques métriques SEO."""
+    """Analyse une page web et retourne ses métriques SEO : 
+       - Type de contenu (Article, Page de service, Comparateur, Autre)
+       - Structure Hn (H1 et H2s)
+       - Nombre de mots
+       - Nombre de liens internes/externes
+       - Médias présents (images, vidéos, audios, iframes embed)
+    """
     try:
-        resp = requests.get(url, timeout=10)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # 1. Type de page
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Détection du type de page
         page_type = "Autre"
         if soup.find('article'):
             page_type = 'Article'
-        elif soup.find('section') and 'service' in resp.text.lower():
+        elif soup.find('section') and 'service' in response.text.lower():
             page_type = 'Page de service'
-        elif 'comparateur' in resp.text.lower():
+        elif 'comparateur' in response.text.lower():
             page_type = 'Comparateur'
 
-        # 2. H1 / H2
-        h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
-        h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2')]
+        # Extraction des headers
+        h1 = soup.find('h1').get_text().strip() if soup.find('h1') else "Aucun H1"
+        h2s = [tag.get_text().strip() for tag in soup.find_all('h2')]
 
-        # 3. Word count
+        # Comptage des mots
         word_count = len(soup.get_text().split())
 
-        # 4. Liens internes / externes
+        # Liens internes et externes
         links = soup.find_all('a', href=True)
         internal_links = [link['href'] for link in links if url in link['href']]
         external_links = [link['href'] for link in links if url not in link['href']]
 
-        # 5. Médias
+        # Médias présents
         images = len(soup.find_all('img'))
         videos = len(soup.find_all('video'))
         audios = len(soup.find_all('audio'))
-        embedded = len(soup.find_all('iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)))
+        embedded_videos = len(soup.find_all(
+            'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
+        ))
 
         return {
             "type": page_type,
@@ -74,19 +66,41 @@ def analyze_page(url):
                 "images": images,
                 "videos": videos,
                 "audios": audios,
-                "embedded_videos": embedded
+                "embedded_videos": embedded_videos
             }
         }
-
     except Exception as e:
-        logging.error(f"Erreur analyze_page : {str(e)}")
+        logging.error(f"Erreur d'analyse: {str(e)}")
         return {"error": str(e)}
 
+def get_driver():
+    """Configuration optimisée de Selenium pour Chromium"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1280x720")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+    # Chemin binaire de Chromium (vérifie que c'est correct sur Railway)
+    chrome_options.binary_location = "/usr/bin/chromium"
+
+    service = Service(
+        executable_path="/usr/bin/chromedriver",
+        service_args=["--verbose"]
+    )
+    
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver.set_page_load_timeout(60)
+    return driver
+
 @app.route('/scrape', methods=['GET'])
-def scrape_google():
-    """
-    GET /scrape?query=exemple
-    Récupère PAA, recherches associées, et le top 10 (avec analyse de page).
+def scrape_google_fr():
+    """Endpoint GET pour scraper Google.fr.
+       Récupère le top 10, PAA (People Also Ask) et les recherches associées.
+       Exemple d'appel : GET /scrape?query=seo+freelance
     """
     query = request.args.get('query')
     if not query:
@@ -94,21 +108,25 @@ def scrape_google():
 
     driver = None
     try:
-        logging.info(f"Scraping pour la requête: {query}")
+        logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Charger Google.fr, paramètre gl=fr pour cibler la France
-        driver.get(f"https://www.google.fr/search?q={query}&gl=fr")
+        # On cible Google France (paramètre &gl=fr pour forcer FR)
+        driver.get(f"https://www.google.com/search?q={query}&gl=fr")
 
-        # Attendre que le contenu principal se charge
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.tF2Cxc, div.g"))
+        # Attendre que le body soit non-vide
+        WebDriverWait(driver, 30).until(
+            lambda d: d.find_element(By.TAG_NAME, "body").text != ""
         )
+        time.sleep(3)
+
+        # Scroll basique
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
-        # Récupérer le HTML avec BeautifulSoup
+        # Récupérer le HTML complet pour extraire PAA et recherches associées
         html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, 'html.parser')
 
         # PAA (People Also Ask)
         paa_questions = []
@@ -126,44 +144,42 @@ def scrape_google():
             if txt:
                 associated_searches.append(txt)
 
-        # Top 10
-        results_divs = soup.select("div.tF2Cxc, div.g")
-        top10 = []
-        count = 0
-        for div in results_divs:
-            if count >= 10:
-                break
-            # Certains blocs 'div.g' n'ont pas toujours un <a> avec un h3
-            link_elem = div.select_one("a")
-            title_elem = div.select_one("h3")
-            if link_elem and title_elem:
-                link = link_elem.get("href", "#")
-                title = title_elem.get_text(strip=True) or "Sans titre"
-                analysis = analyze_page(link)
+        # Récupérer le top 10 (div.g ou div[data-sokoban-container])
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.g, div[data-sokoban-container]")[:10]
 
-                top10.append({
-                    "rank": count + 1,
-                    "link": link,
+        results = []
+        for element in search_results:
+            try:
+                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                title = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']").text
+                analysis = analyze_page(link)
+                results.append({
                     "title": title,
+                    "link": link,
                     "analysis": analysis
                 })
-                count += 1
+            except Exception as e:
+                logging.warning(f"Élément ignoré : {str(e)}")
+                continue
 
         return jsonify({
             "query": query,
             "paa_questions": paa_questions,
             "associated_searches": associated_searches,
-            "top_10_data": top10
+            "results": results
         })
 
     except Exception as e:
-        logging.error(f"ERREUR : {str(e)}\n{traceback.format_exc()}")
-        return jsonify({"error": "Erreur interne", "details": str(e)}), 500
+        logging.error(f"ERREUR: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({
+            "error": "Service temporairement indisponible",
+            "code": 503
+        }), 503
 
     finally:
         if driver:
             driver.quit()
-            logging.info("Fermeture du navigateur")
+            logging.info("Fermeture du navigateur.")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
