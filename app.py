@@ -24,12 +24,11 @@ def analyze_page(url):
      - Le nombre de mots
      - Le nombre de liens internes / externes
      - Les médias (images, vidéos, audios, iframes embed)
-     - Les données structurées JSON-LD (structured_data)
+     - Les données structurées JSON-LD (uniquement le type)
     """
     try:
-        # On peut laisser un petit délai après la requête si nécessaire
         response = requests.get(url, timeout=10)
-        time.sleep(1)  # Facultatif, si certaines pages redirigent lentement
+        time.sleep(1)  # On laisse 1s pour éviter les éventuels retours 403 en cascade
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # --- H1 / H2
@@ -49,7 +48,7 @@ def analyze_page(url):
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
-            elif link_domain:  # si domain différent et non vide
+            elif link_domain:  # un domaine différent et non vide
                 external_count += 1
 
         # --- Médias
@@ -60,12 +59,21 @@ def analyze_page(url):
             'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
         ))
 
-        # --- Données structurées (JSON-LD)
-        structured_data = []
+        # --- Données structurées (JSON-LD) : ne renvoyer QUE le @type
+        structured_data_types = []
         for script_tag in soup.find_all("script", type="application/ld+json"):
             try:
                 json_data = json.loads(script_tag.string)
-                structured_data.append(json_data)
+                if isinstance(json_data, dict):
+                    # Un seul objet
+                    schema_type = json_data.get("@type", "Unknown")
+                    structured_data_types.append(schema_type)
+                elif isinstance(json_data, list):
+                    # Plusieurs objets
+                    for item in json_data:
+                        if isinstance(item, dict):
+                            schema_type = item.get("@type", "Unknown")
+                            structured_data_types.append(schema_type)
             except Exception as e:
                 logging.debug(f"Erreur parsing JSON-LD : {e}")
                 continue
@@ -84,7 +92,7 @@ def analyze_page(url):
                 "audios": audios,
                 "embedded_videos": embedded_videos
             },
-            "structured_data": structured_data
+            "structured_data": structured_data_types
         }
 
     except Exception as e:
@@ -117,11 +125,12 @@ def get_driver():
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
     """
-    Endpoint pour scraper les résultats Google et analyser chaque page.
+    Endpoint GET pour scraper Google.fr.
+    Récupère le top 10, PAA (People Also Ask), recherches associées,
+    et pour chaque URL : domain, title, headers, word_count, internal_links,
+    external_links, media, structured_data (@type seulement).
+
     Ex : GET /scrape?query=seo+freelance
-    Retourne :
-     - query
-     - résultats (liste) : domain, title, headers, word_count, internal_links, external_links, media, structured_data
     """
     query = request.args.get('query')
     if not query:
@@ -135,7 +144,7 @@ def scrape_google_fr():
         # Google France
         driver.get(f"https://www.google.com/search?q={query}&gl=fr")
 
-        # Attendre que le body soit non-vide
+        # Attendre que le body ne soit pas vide
         WebDriverWait(driver, 30).until(
             lambda d: d.find_element(By.TAG_NAME, "body").text != ""
         )
@@ -143,23 +152,43 @@ def scrape_google_fr():
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
-        # Récupération des 10 premiers résultats
-        search_results = driver.find_elements(By.CSS_SELECTOR, "div.g, div[data-sokoban-container]")[:10]
+        # Extraire HTML avec BeautifulSoup
+        html = driver.page_source
+        soup = BeautifulSoup(html, 'html.parser')
 
+        # --- PAA (People Also Ask)
+        paa_questions = []
+        paa_spans = soup.select('span.CSkcDe')
+        for span in paa_spans:
+            question_text = span.get_text(strip=True)
+            if question_text:
+                paa_questions.append(question_text)
+
+        # --- Recherches associées
+        associated_searches = []
+        assoc_elems = soup.select("div.y6Uyqe div.B2VR9.CJHX3e")
+        for elem in assoc_elems:
+            txt = elem.get_text(strip=True)
+            if txt:
+                associated_searches.append(txt)
+
+        # --- Top 10
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.g, div[data-sokoban-container]")[:10]
         results = []
         for element in search_results:
             try:
                 link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
-                title = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']").text
+                title_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                title = title_elem.text if title_elem else "Sans titre"
 
-                # Déterminer le domaine
+                # Domaine
                 domain = urlparse(link).netloc
 
-                # Analyser la page
+                # Analyse de la page
                 page_analysis = analyze_page(link)
 
-                # Construire l'objet "analysis" final tel que souhaité
-                analysis = {
+                # Structurer la réponse finale pour chaque résultat
+                result_info = {
                     "domain": domain,
                     "title": title,
                     "headers": page_analysis["headers"],
@@ -169,8 +198,7 @@ def scrape_google_fr():
                     "media": page_analysis["media"],
                     "structured_data": page_analysis["structured_data"]
                 }
-
-                results.append(analysis)
+                results.append(result_info)
 
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
@@ -178,6 +206,8 @@ def scrape_google_fr():
 
         return jsonify({
             "query": query,
+            "paa_questions": paa_questions,
+            "associated_searches": associated_searches,
             "results": results
         })
 
