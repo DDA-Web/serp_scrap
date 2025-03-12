@@ -89,6 +89,7 @@ def analyze_page(url):
                 continue
 
         return {
+            "url": url,  # ➜ Ajout de l'URL complète
             "page_title": page_title,
             "meta_description": meta_description,
             "headers": {
@@ -140,6 +141,7 @@ def scrape_google_fr():
     Récupère le top 10, PAA, recherches associées,
     et pour chaque URL : 
       - google_snippet (ce qui vient de la SERP)
+      - url
       - domain
       - page_title (de la page)
       - meta_description (de la page)
@@ -148,8 +150,6 @@ def scrape_google_fr():
       - internal_links, external_links
       - media
       - structured_data
-
-    Ex: GET /scrape?query=photogénique
     """
     query = request.args.get('query')
     if not query:
@@ -160,10 +160,8 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Google France
         driver.get(f"https://www.google.com/search?q={query}&gl=fr")
 
-        # Attendre que le body ne soit pas vide
         WebDriverWait(driver, 30).until(
             lambda d: d.find_element(By.TAG_NAME, "body").text != ""
         )
@@ -171,25 +169,14 @@ def scrape_google_fr():
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
-        # Extraire HTML via BeautifulSoup
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
 
         # --- PAA
-        paa_questions = []
-        paa_spans = soup.select('span.CSkcDe')
-        for span in paa_spans:
-            question_text = span.get_text(strip=True)
-            if question_text:
-                paa_questions.append(question_text)
+        paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
 
         # --- Recherches associées
-        associated_searches = []
-        assoc_elems = soup.select("div.y6Uyqe div.B2VR9.CJHX3e")
-        for elem in assoc_elems:
-            txt = elem.get_text(strip=True)
-            if txt:
-                associated_searches.append(txt)
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
 
         # --- Top 10
         search_results = driver.find_elements(By.CSS_SELECTOR, "div.g, div[data-sokoban-container]")[:10]
@@ -198,17 +185,16 @@ def scrape_google_fr():
         for element in search_results:
             try:
                 link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
-                # "Google snippet" : le titre depuis la SERP
                 snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
                 google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
 
                 domain = urlparse(link).netloc
 
-                # Analyser la page (titre, meta desc, etc.)
                 page_info = analyze_page(link)
 
                 result_info = {
                     "google_snippet": google_snippet,
+                    "url": link,  # ➜ Ajout de l'URL complète ici aussi
                     "domain": domain,
                     "page_title": page_info["page_title"],
                     "meta_description": page_info["meta_description"],
@@ -233,10 +219,7 @@ def scrape_google_fr():
 
     except Exception as e:
         logging.error(f"ERREUR: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({
-            "error": "Service temporairement indisponible",
-            "code": 503
-        }), 503
+        return jsonify({"error": "Service temporairement indisponible", "code": 503}), 503
 
     finally:
         if driver:
