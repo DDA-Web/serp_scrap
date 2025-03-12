@@ -1,51 +1,57 @@
 from flask import Flask, request, jsonify
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-
 from bs4 import BeautifulSoup
 import requests
 import time
-import json
+import logging
+import traceback
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+
+def get_driver():
+    """Configuration Selenium (Chromium headless)"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1280x720")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.binary_location = "/usr/bin/chromium"   # Chemin de chromium
+    service = Service("/usr/bin/chromedriver")             # Chemin de chromedriver
+
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver.set_page_load_timeout(60)
+    return driver
 
 def analyze_page(url):
-    """
-    Analyse le contenu d'une URL donnée et retourne un dictionnaire contenant :
-      - Le type de page (Article, Page de service, Comparateur, Autre)
-      - Les entêtes H1 et H2
-      - Le nombre de mots
-      - Le nombre de liens internes et externes
-      - Le nombre d'images, vidéos, audios, vidéos embed
-      - Les types de données structurées (JSON-LD)
-    """
+    """Analyse la page en HTTP (requests + BeautifulSoup), renvoie quelques métriques SEO."""
     try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
+        resp = requests.get(url, timeout=10)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
         # 1. Type de page
+        page_type = "Autre"
         if soup.find('article'):
             page_type = 'Article'
-        elif soup.find('section') and 'service' in response.text.lower():
+        elif soup.find('section') and 'service' in resp.text.lower():
             page_type = 'Page de service'
-        elif 'comparateur' in response.text.lower():
+        elif 'comparateur' in resp.text.lower():
             page_type = 'Comparateur'
-        else:
-            page_type = 'Autre'
 
-        # 2. Structure HN
-        h1 = soup.find('h1').text.strip() if soup.find('h1') else "Aucun H1"
+        # 2. H1 / H2
+        h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
         h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2')]
-        headers = {'H1': h1, 'H2': h2s}
 
-        # 3. Nombre de mots
-        words = len(soup.get_text().split())
+        # 3. Word count
+        word_count = len(soup.get_text().split())
 
         # 4. Liens internes / externes
         links = soup.find_all('a', href=True)
@@ -56,170 +62,108 @@ def analyze_page(url):
         images = len(soup.find_all('img'))
         videos = len(soup.find_all('video'))
         audios = len(soup.find_all('audio'))
-        embedded_videos = len(soup.find_all(
-            'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
-        ))
-
-        # 6. Données structurées JSON-LD
-        structured_data_types = []
-        for script_tag in soup.find_all("script", type="application/ld+json"):
-            try:
-                json_data = json.loads(script_tag.string)
-                if isinstance(json_data, list):
-                    for item in json_data:
-                        if isinstance(item, dict) and "@type" in item:
-                            structured_data_types.append(item["@type"])
-                elif isinstance(json_data, dict):
-                    if "@type" in json_data:
-                        structured_data_types.append(json_data["@type"])
-            except Exception:
-                continue
+        embedded = len(soup.find_all('iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)))
 
         return {
-            'type': page_type,
-            'headers': headers,
-            'word_count': words,
-            'internal_links': len(internal_links),
-            'external_links': len(external_links),
-            'media': {
-                'images': images,
-                'videos': videos,
-                'audios': audios,
-                'embedded_videos': embedded_videos
-            },
-            'structured_data_types': structured_data_types
+            "type": page_type,
+            "headers": {"H1": h1, "H2": h2s},
+            "word_count": word_count,
+            "internal_links": len(internal_links),
+            "external_links": len(external_links),
+            "media": {
+                "images": images,
+                "videos": videos,
+                "audios": audios,
+                "embedded_videos": embedded
+            }
         }
+
     except Exception as e:
-        return {'error': str(e)}
+        logging.error(f"Erreur analyze_page : {str(e)}")
+        return {"error": str(e)}
 
-def google_scraper(query):
+@app.route('/scrape', methods=['GET'])
+def scrape_google():
     """
-    Lance une recherche Google via Selenium (Chrome headless) et renvoie :
-      - La liste des questions "People Also Ask" (PAA)
-      - Les recherches associées
-      - Le Top 10 des résultats : domaine, lien, titre et analyse de page
+    GET /scrape?query=exemple
+    Récupère PAA, recherches associées, et le top 10 (avec analyse de page).
     """
-    chrome_options = Options()
-    # Arguments recommandés pour l'exécution dans un conteneur
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--start-maximized")
+    query = request.args.get('query')
+    if not query:
+        return jsonify({"error": "Paramètre 'query' requis"}), 400
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
-
+    driver = None
     try:
-        driver.get("https://www.google.fr")
+        logging.info(f"Scraping pour la requête: {query}")
+        driver = get_driver()
 
-        # Accepter les cookies si le bouton apparaît
-        try:
-            accept_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button#L2AGLb"))
-            )
-            accept_button.click()
-        except:
-            pass
+        # Charger Google.fr, paramètre gl=fr pour cibler la France
+        driver.get(f"https://www.google.fr/search?q={query}&gl=fr")
 
-        # Saisir la requête et valider
-        search_box = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.NAME, "q"))
-        )
-        search_box.send_keys(query + Keys.RETURN)
-
-        # Attendre que les résultats soient chargés
+        # Attendre que le contenu principal se charge
         WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.tF2Cxc"))
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.tF2Cxc, div.g"))
         )
         time.sleep(1)
 
-        # Récupérer le HTML complet
+        # Récupérer le HTML avec BeautifulSoup
         html = driver.page_source
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, "html.parser")
 
-        # 1) Extraction des PAA (People Also Ask)
+        # PAA (People Also Ask)
         paa_questions = []
-        question_spans = soup.select('span.CSkcDe')
-        for span in question_spans:
-            text = span.get_text(strip=True)
-            if text:
-                paa_questions.append(text)
+        paa_spans = soup.select('span.CSkcDe')
+        for span in paa_spans:
+            question_text = span.get_text(strip=True)
+            if question_text:
+                paa_questions.append(question_text)
 
-        # 2) Extraction des recherches associées
+        # Recherches associées
+        associated_searches = []
         assoc_elems = soup.select("div.y6Uyqe div.B2VR9.CJHX3e")
-        associated_searches = [elem.get_text(strip=True) for elem in assoc_elems if elem.get_text(strip=True)]
+        for elem in assoc_elems:
+            txt = elem.get_text(strip=True)
+            if txt:
+                associated_searches.append(txt)
 
-        # 3) Extraction du Top 10
-        results = soup.select("div.tF2Cxc")
-        top_10_data = []
-        for i, result in enumerate(results[:10], start=1):
-            try:
-                title_elem = result.select_one("h3")
-                title = title_elem.get_text(strip=True) if title_elem else "Sans titre"
-
-                link_elem = result.select_one("a")
-                link = link_elem["href"] if link_elem else "#"
-                domain = link.split("/")[2] if link.startswith("http") else "N/A"
-
-                # Analyse de la page
+        # Top 10
+        results_divs = soup.select("div.tF2Cxc, div.g")
+        top10 = []
+        count = 0
+        for div in results_divs:
+            if count >= 10:
+                break
+            # Certains blocs 'div.g' n'ont pas toujours un <a> avec un h3
+            link_elem = div.select_one("a")
+            title_elem = div.select_one("h3")
+            if link_elem and title_elem:
+                link = link_elem.get("href", "#")
+                title = title_elem.get_text(strip=True) or "Sans titre"
                 analysis = analyze_page(link)
 
-                top_10_data.append({
-                    "rank": i,
-                    "domain": domain,
+                top10.append({
+                    "rank": count + 1,
                     "link": link,
                     "title": title,
                     "analysis": analysis
                 })
-            except Exception as e:
-                # On ignore l'erreur pour cet élément et on passe au suivant
-                print(f"Erreur sur un résultat : {e}")
+                count += 1
 
-        return {
+        return jsonify({
+            "query": query,
             "paa_questions": paa_questions,
             "associated_searches": associated_searches,
-            "top_10_data": top_10_data
-        }
+            "top_10_data": top10
+        })
 
     except Exception as e:
-        return {"error": str(e)}
+        logging.error(f"ERREUR : {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"error": "Erreur interne", "details": str(e)}), 500
 
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
+            logging.info("Fermeture du navigateur")
 
-@app.route('/analyze', methods=['POST'])
-def analyze_endpoint():
-    """
-    Endpoint pour analyser le contenu d'une page.
-    Requête JSON attendue : { "url": "https://exemple.com" }
-    """
-    data = request.get_json()
-    url = data.get("url", "")
-    if not url:
-        return jsonify({"error": "Merci de fournir un paramètre 'url'"}), 400
-
-    result = analyze_page(url)
-    return jsonify(result)
-
-@app.route('/scrape_google', methods=['POST'])
-def scrape_google_endpoint():
-    """
-    Endpoint pour lancer une recherche Google.
-    Requête JSON attendue : { "query": "votre requête de recherche" }
-    """
-    data = request.get_json()
-    query = data.get("query", "")
-    if not query:
-        return jsonify({"error": "Merci de fournir un paramètre 'query'"}), 400
-
-    result = google_scraper(query)
-    return jsonify(result)
-
-# Point d'entrée principal pour Gunicorn
-if __name__ == "__main__":
-    # Lancement du serveur Flask en local (pour debug)
-    # En production, c'est Gunicorn (cf. CMD dans Dockerfile) qui sert l'appli.
-    app.run(host="0.0.0.0", port=8000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000, debug=True)
