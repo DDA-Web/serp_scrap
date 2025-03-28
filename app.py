@@ -179,7 +179,7 @@ def scrape_google_fr():
         associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
 
         # --- Top 10
-        search_results = driver.find_elements(By.CSS_SELECTOR, "div.g, div[data-sokoban-container]")[:10]
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
         results = []
 
         for element in search_results:
