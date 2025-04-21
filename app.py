@@ -115,10 +115,14 @@ def analyze_page(url):
 def get_driver():
     """Configuration Selenium/Chromium"""
     chrome_options = Options()
+    
+    # Option pour Railway (environnement serveur)
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1280x720")
+    
+    # Options communes avec votre script local
+    chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -160,76 +164,128 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Utiliser Google.com avec paramètres français
-        driver.get(f"https://www.google.com/search?q={query}&gl=fr&hl=fr")
-
-        WebDriverWait(driver, 30).until(
-            lambda d: d.find_element(By.TAG_NAME, "body").text != ""
-        )
-        time.sleep(2)
+        # Utiliser explicitement Google.fr comme dans votre script local
+        driver.get("https://www.google.fr")
         
+        # Accepter les cookies (comme dans votre script local)
+        try:
+            accept_button = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button#L2AGLb"))
+            )
+            accept_button.click()
+            time.sleep(1)
+        except Exception as e:
+            logging.info(f"Pas de popup cookies ou déjà accepté: {str(e)}")
+        
+        # Saisir la requête comme dans votre script local
+        search_box = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.NAME, "q"))
+        )
+        search_box.clear()
+        search_box.send_keys(query)
+        search_box.send_keys(Keys.RETURN)
+        
+        # Attendre que les résultats soient chargés, en ciblant spécifiquement div.tF2Cxc
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.tF2Cxc"))
+            )
+        except:
+            # Fallback si div.tF2Cxc n'est pas trouvé
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.MjjYud"))
+            )
+
         # Scroll pour charger tout le contenu
         driver.execute_script("window.scrollTo(0, 300);")
-        time.sleep(0.5)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
-        driver.execute_script("window.scrollTo(0, 300);") # Revenir aux PAA
-        time.sleep(0.5)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, 300);")
+        time.sleep(1)
 
+        # Récupérer le HTML et le parser
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
+        
+        # Log de debug pour voir les classes disponibles
+        logging.info(f"Classes disponibles (span): {[elem.get('class') for elem in soup.select('span') if elem.get('class')][:5]}")
+        logging.info(f"Classes disponibles (div): {[elem.get('class') for elem in soup.select('div') if elem.get('class')][:5]}")
 
         # --- 1) Extraction des PAA (People Also Ask) ---
-        # Chaque question se trouve dans un <span class="CSkcDe"> d'après votre inspection
-        paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
+        #    Exactement comme dans votre script local
+        paa_questions = []
+        question_spans = soup.select('span.CSkcDe')
+        logging.info(f"Nombre de spans PAA trouvés: {len(question_spans)}")
+        for span in question_spans:
+            text = span.get_text(strip=True)
+            if text:
+                paa_questions.append(text)
 
         # --- 2) Extraction des recherches associées ---
-        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
+        #    Exactement comme dans votre script local
+        assoc_elems = soup.select("div.y6Uyqe div.B2VR9.CJHX3e")
+        logging.info(f"Nombre d'éléments de recherches associées trouvés: {len(assoc_elems)}")
+        associated_searches = [elem.get_text(strip=True) for elem in assoc_elems if elem.get_text(strip=True)]
 
         # --- 3) Extraction du Top 10 ---
-        # Vous avez mentionné div.tF2Cxc mais votre code utilise div.MjjYud
-        # Essayons d'abord div.tF2Cxc
-        search_elements = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")
+        #    Utiliser d'abord div.tF2Cxc comme dans votre script local
+        results_elements = soup.select("div.tF2Cxc")
+        logging.info(f"Nombre d'éléments div.tF2Cxc trouvés: {len(results_elements)}")
         
-        # Si aucun résultat avec tF2Cxc, utiliser MjjYud comme dans votre code original
-        if not search_elements or len(search_elements) < 3:
-            search_elements = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")
-            
-        # Limiter à 10 résultats
-        search_results = search_elements[:10] if search_elements else []
+        # Si peu d'éléments trouvés, essayer avec le sélecteur MjjYud
+        if len(results_elements) < 5:
+            results_elements = soup.select("div.MjjYud")
+            logging.info(f"Fallback : Nombre d'éléments div.MjjYud trouvés: {len(results_elements)}")
+        
+        # Limiter aux 10 premiers résultats
+        results_elements = results_elements[:10]
         
         results = []
-
-        for element in search_results:
+        for i, result in enumerate(results_elements, start=1):
             try:
-                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
-                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
-                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
-
+                # Trouver le titre et le lien (comme dans votre script local)
+                title_elem = result.select_one("h3")
+                title = title_elem.get_text(strip=True) if title_elem else "Sans titre"
+                
+                link_elem = result.select_one("a")
+                link = link_elem["href"] if link_elem and link_elem.has_attr("href") else ""
+                
+                if not link or "google.com" in link:
+                    continue
+                    
                 domain = urlparse(link).netloc
 
+                # Analyser la page
                 page_info = analyze_page(link)
 
                 result_info = {
-                    "google_snippet": google_snippet,
+                    "google_snippet": title,
                     "url": link,
                     "domain": domain,
-                    "page_title": page_info["page_title"],
-                    "meta_description": page_info["meta_description"],
-                    "headers": page_info["headers"],
-                    "word_count": page_info["word_count"],
-                    "internal_links": page_info["internal_links"],
-                    "external_links": page_info["external_links"],
-                    "media": page_info["media"],
-                    "structured_data": page_info["structured_data"]
+                    "page_title": page_info.get("page_title", ""),
+                    "meta_description": page_info.get("meta_description", ""),
+                    "headers": page_info.get("headers", {"H1": "", "H2": []}),
+                    "word_count": page_info.get("word_count", 0),
+                    "internal_links": page_info.get("internal_links", 0),
+                    "external_links": page_info.get("external_links", 0),
+                    "media": page_info.get("media", {}),
+                    "structured_data": page_info.get("structured_data", [])
                 }
                 results.append(result_info)
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
-        
+
         # Éviter les doublons entre PAA et recherches associées
         paa_questions = [q for q in paa_questions if q not in associated_searches]
+
+        # Log final pour diagnostiquer les résultats
+        logging.info(f"PAA questions: {len(paa_questions)}")
+        logging.info(f"Recherches associées: {len(associated_searches)}")
+        logging.info(f"Résultats: {len(results)}")
 
         return jsonify({
             "query": query,
