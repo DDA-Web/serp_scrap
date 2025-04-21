@@ -17,57 +17,91 @@ import json
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
 def analyze_page(url):
+    """
+    Analyse une page web et retourne :
+     - page_title (balise <title>)
+     - meta_description (balise <meta name="description">)
+     - headers (H1, H2)
+     - word_count
+     - internal_links, external_links
+     - media
+     - structured_data (liste des @type des JSON-LD)
+    """
     try:
-        resp = requests.get(url, timeout=10)
-        time.sleep(1)
+        # Ajout d'headers pour éviter la détection
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        time.sleep(1)  # On attend un peu (si 403 ou redirect)
         soup = BeautifulSoup(resp.text, 'html.parser')
 
+        # --- Titre de la page
         page_title_tag = soup.find('title')
         page_title = page_title_tag.get_text(strip=True) if page_title_tag else "Aucun <title>"
 
+        # --- Méta description
         meta_desc_tag = soup.find("meta", attrs={"name": "description"})
-        meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else "Aucune meta description"
+        if meta_desc_tag and meta_desc_tag.get("content"):
+            meta_description = meta_desc_tag["content"].strip()
+        else:
+            meta_description = "Aucune meta description"
 
+        # --- H1 / H2
         h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
         h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2')]
 
+        # --- Nombre de mots
         word_count = len(soup.get_text().split())
 
+        # --- Liens internes / externes
         page_domain = urlparse(url).netloc
-        internal_count, external_count = 0, 0
-        for link in soup.find_all('a', href=True):
+        internal_count = 0
+        external_count = 0
+        links = soup.find_all('a', href=True)
+        for link in links:
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
             elif link_domain:
                 external_count += 1
 
+        # --- Médias
         images = len(soup.find_all('img'))
         videos = len(soup.find_all('video'))
         audios = len(soup.find_all('audio'))
-        embedded_videos = len(soup.find_all('iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)))
+        embedded_videos = len(soup.find_all(
+            'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
+        ))
 
+        # --- Données structurées : on ne prend que @type
         structured_data_types = []
         for script_tag in soup.find_all("script", type="application/ld+json"):
             try:
                 json_data = json.loads(script_tag.string)
                 if isinstance(json_data, dict):
-                    structured_data_types.append(json_data.get("@type", "Unknown"))
+                    schema_type = json_data.get("@type", "Unknown")
+                    structured_data_types.append(schema_type)
                 elif isinstance(json_data, list):
                     for item in json_data:
                         if isinstance(item, dict):
-                            structured_data_types.append(item.get("@type", "Unknown"))
+                            schema_type = item.get("@type", "Unknown")
+                            structured_data_types.append(schema_type)
             except Exception as e:
                 logging.debug(f"Erreur parsing JSON-LD : {e}")
                 continue
 
         return {
-            "url": url,
+            "url": url,  # ➜ Ajout de l'URL complète
             "page_title": page_title,
             "meta_description": meta_description,
-            "headers": {"H1": h1, "H2": h2s},
+            "headers": {
+                "H1": h1,
+                "H2": h2s
+            },
             "word_count": word_count,
             "internal_links": internal_count,
             "external_links": external_count,
@@ -79,12 +113,13 @@ def analyze_page(url):
             },
             "structured_data": structured_data_types
         }
+
     except Exception as e:
         logging.error(f"Erreur d'analyse de {url}: {str(e)}")
         return {"error": str(e)}
 
-
 def get_driver():
+    """Configuration Selenium/Chromium"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -92,17 +127,44 @@ def get_driver():
     chrome_options.add_argument("--window-size=1280x720")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+    # Changement du User-Agent pour un plus récent
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     chrome_options.binary_location = "/usr/bin/chromium"
 
-    service = Service(executable_path="/usr/bin/chromedriver", service_args=["--verbose"])
+    service = Service(
+        executable_path="/usr/bin/chromedriver",
+        service_args=["--verbose"]
+    )
+    
     driver = webdriver.Chrome(service=service, options=chrome_options)
+    # Script pour masquer l'automatisation
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """
+    })
     driver.set_page_load_timeout(60)
     return driver
 
-
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
+    """
+    Endpoint GET pour scraper Google.fr.
+    Récupère le top 10, PAA, recherches associées,
+    et pour chaque URL : 
+      - google_snippet (ce qui vient de la SERP)
+      - url
+      - domain
+      - page_title (de la page)
+      - meta_description (de la page)
+      - headers (H1, H2)
+      - word_count
+      - internal_links, external_links
+      - media
+      - structured_data
+    """
     query = request.args.get('query')
     if not query:
         return jsonify({"error": "Paramètre 'query' requis"}), 400
@@ -111,9 +173,19 @@ def scrape_google_fr():
     try:
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
-        driver.get(f"https://www.google.com/search?q={query}&gl=fr")
 
-        WebDriverWait(driver, 30).until(lambda d: d.find_element(By.TAG_NAME, "body").text != "")
+        # Utiliser google.fr au lieu de google.com
+        driver.get(f"https://www.google.fr/search?q={query}&gl=fr&hl=fr")
+
+        WebDriverWait(driver, 30).until(
+            lambda d: d.find_element(By.TAG_NAME, "body").text != ""
+        )
+        
+        # Vérifier si un CAPTCHA est présent
+        if "captcha" in driver.page_source.lower() or "vérification" in driver.page_source.lower():
+            logging.warning("CAPTCHA détecté")
+            return jsonify({"error": "CAPTCHA détecté, réessayez plus tard", "code": 503}), 503
+            
         time.sleep(3)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
@@ -121,39 +193,46 @@ def scrape_google_fr():
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
 
+        # --- PAA
         paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
-        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.B2VR9.CJHX3e")]
 
-        search_results = soup.select("div.tF2Cxc")[:10]
+        # --- Recherches associées
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
+
+        # --- Top 10
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
         results = []
 
-        for result in search_results:
+        for element in search_results:
             try:
-                a_tag = result.find("a", href=True)
-                link = a_tag["href"] if a_tag else None
-                snippet_elem = result.find("h3") or result.find("span", attrs={"role": "heading"})
-                google_snippet = snippet_elem.text.strip() if snippet_elem else "Sans titre"
+                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
 
-                domain = urlparse(link).netloc if link else ""
-                page_info = analyze_page(link) if link else {}
+                domain = urlparse(link).netloc
+
+                page_info = analyze_page(link)
 
                 result_info = {
                     "google_snippet": google_snippet,
-                    "url": link,
+                    "url": link,  # ➜ Ajout de l'URL complète ici aussi
                     "domain": domain,
-                    "page_title": page_info.get("page_title"),
-                    "meta_description": page_info.get("meta_description"),
-                    "headers": page_info.get("headers"),
-                    "word_count": page_info.get("word_count"),
-                    "internal_links": page_info.get("internal_links"),
-                    "external_links": page_info.get("external_links"),
-                    "media": page_info.get("media"),
-                    "structured_data": page_info.get("structured_data")
+                    "page_title": page_info["page_title"],
+                    "meta_description": page_info["meta_description"],
+                    "headers": page_info["headers"],
+                    "word_count": page_info["word_count"],
+                    "internal_links": page_info["internal_links"],
+                    "external_links": page_info["external_links"],
+                    "media": page_info["media"],
+                    "structured_data": page_info["structured_data"]
                 }
                 results.append(result_info)
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
+
+        # Éviter les doublons entre PAA et recherches associées
+        paa_questions = [q for q in paa_questions if q not in associated_searches]
 
         return jsonify({
             "query": query,
@@ -170,7 +249,6 @@ def scrape_google_fr():
         if driver:
             driver.quit()
             logging.info("Fermeture du navigateur.")
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
