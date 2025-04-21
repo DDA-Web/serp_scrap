@@ -3,6 +3,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
@@ -12,6 +13,7 @@ import logging
 import traceback
 from urllib.parse import urlparse
 import json
+import random
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +30,17 @@ def analyze_page(url):
      - structured_data (liste des @type des JSON-LD)
     """
     try:
-        resp = requests.get(url, timeout=15)
+        # Ajouter des headers plus convaincants
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.google.fr/"
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=15)
+        time.sleep(1)  # On attend un peu (si 403 ou redirect)
         soup = BeautifulSoup(resp.text, 'html.parser')
 
         # --- Titre de la page
@@ -87,7 +99,7 @@ def analyze_page(url):
                 continue
 
         return {
-            "url": url,
+            "url": url,  # ➜ Ajout de l'URL complète
             "page_title": page_title,
             "meta_description": meta_description,
             "headers": {
@@ -111,24 +123,36 @@ def analyze_page(url):
         return {"error": str(e)}
 
 def get_driver():
-    """Configuration Selenium/Chromium optimisée pour Railway"""
+    """Configuration Selenium/Chromium améliorée pour éviter la détection"""
+    # Liste de user agents modernes
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
+    ]
+    
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")  # Résolution d'écran standard
     
-    # Options supplémentaires pour réduire l'utilisation des ressources
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=800,600")
-    chrome_options.add_argument("--block-new-web-contents")
-    chrome_options.add_argument("--disable-images")
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    
+    # Paramètres de furtivité avancés
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument(f"--user-agent={random.choice(user_agents)}")
+    
+    # Langues et fuseaux horaires réalistes
+    chrome_options.add_argument("--lang=fr-FR,fr")
+    chrome_options.add_argument("--accept-lang=fr-FR")
+    chrome_options.add_argument("--timezone=Europe/Paris")
+    
+    # Comportement de navigateur standard
+    chrome_options.add_argument("--enable-javascript")
+    chrome_options.add_argument("--dns-prefetch-disable")
+    
     chrome_options.binary_location = "/usr/bin/chromium"
 
     service = Service(
@@ -137,15 +161,42 @@ def get_driver():
     )
     
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    # Augmentation du timeout pour éviter les erreurs
-    driver.set_page_load_timeout(120)
+    
+    # Définir des valeurs pour les webdriver properties afin d'éviter la détection
+    driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": random.choice(user_agents)})
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            window.chrome = {
+                runtime: {}
+            };
+        """
+    })
+    
+    driver.set_page_load_timeout(90)
     return driver
 
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
     """
     Endpoint GET pour scraper Google.fr.
-    Version simplifiée pour éviter les timeouts sur Railway.
+    Récupère le top 10, PAA, recherches associées,
+    et pour chaque URL : 
+      - google_snippet (ce qui vient de la SERP)
+      - url
+      - domain
+      - page_title (de la page)
+      - meta_description (de la page)
+      - headers (H1, H2)
+      - word_count
+      - internal_links, external_links
+      - media
+      - structured_data
     """
     query = request.args.get('query')
     if not query:
@@ -156,100 +207,135 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Aller directement à l'URL de recherche
-        driver.get(f"https://www.google.fr/search?q={query}&hl=fr")
+        # Utiliser Google.fr avec des paramètres spécifiques
+        google_url = f"https://www.google.fr/search?q={query}&hl=fr&gl=fr&pws=0"
+        logging.info(f"Accès à l'URL: {google_url}")
+        driver.get(google_url)
 
-        # Attendre que la page se charge avec un timeout plus long
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-        except Exception as e:
-            logging.warning(f"Timeout lors de l'attente de la page: {str(e)}")
-            # Continuer même si le timeout est atteint
-
-        # Un seul scroll léger
-        try:
-            driver.execute_script("window.scrollTo(0, 500);")
-            time.sleep(2)
-        except Exception as e:
-            logging.warning(f"Erreur lors du scroll: {str(e)}")
-
-        html = driver.page_source
-        soup = BeautifulSoup(html, 'html.parser')
+        # Attendre le chargement avec une attente dynamique
+        WebDriverWait(driver, 30).until(
+            lambda d: d.find_element(By.TAG_NAME, "body").text != ""
+        )
         
-        logging.info("HTML récupéré, extraction des données...")
+        # Ajouter un délai aléatoire pour imiter le comportement humain
+        time.sleep(random.uniform(2.5, 4.5))
+        
+        # Vérifier si un captcha est présent
+        if "captcha" in driver.page_source.lower() or "verify you're a human" in driver.page_source.lower():
+            logging.warning("CAPTCHA détecté, impossible de continuer")
+            return jsonify({"error": "Service temporairement indisponible (CAPTCHA)", "code": 503}), 503
 
-        # --- PAA
-        paa_questions = []
-        try:
-            question_spans = soup.select('span.CSkcDe')
-            paa_questions = [span.get_text(strip=True) for span in question_spans if span.get_text(strip=True)]
-            logging.info(f"PAA questions extraites: {len(paa_questions)}")
-        except Exception as e:
-            logging.warning(f"Erreur lors de l'extraction des PAA: {str(e)}")
+        # Scroll de manière plus humaine (petit à petit)
+        for i in range(4):
+            driver.execute_script(f"window.scrollTo(0, {(i+1) * 500});")
+            time.sleep(random.uniform(0.5, 1.5))
+        
+        # Remonter un peu
+        time.sleep(random.uniform(0.5, 1.5))
+        driver.execute_script("window.scrollTo(0, 600);")
+        time.sleep(random.uniform(0.5, 1.5))
 
-        # --- Recherches associées
-        associated_searches = []
-        try:
-            assoc_elems = soup.select("div.y6Uyqe div.B2VR9.CJHX3e")
-            associated_searches = [elem.get_text(strip=True) for elem in assoc_elems if elem.get_text(strip=True)]
-            logging.info(f"Recherches associées extraites: {len(associated_searches)}")
-        except Exception as e:
-            logging.warning(f"Erreur lors de l'extraction des recherches associées: {str(e)}")
+        # Récupérer le HTML
+        html = driver.page_source
+        logging.info("HTML récupéré, analyse du contenu...")
+        
+        # Enregistrer les premiers caractères du HTML pour débugger
+        logging.info(f"Début du HTML: {html[:300]}...")
+        
+        soup = BeautifulSoup(html, 'html.parser')
 
-        # --- Top 5 (limité à 5 au lieu de 10 pour réduire la charge)
+        # --- 1) PAA Questions
+        paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
+        logging.info(f"PAA extraites avec span.CSkcDe: {len(paa_questions)}")
+        
+        # Si aucune PAA trouvée, essayer d'autres sélecteurs
+        if not paa_questions:
+            # Essayer d'autres sélecteurs connus pour PAA
+            selectors = [
+                'div[jsname][role="button"]',  # Sélecteur alternatif 1
+                'div.related-question-pair',    # Sélecteur alternatif 2
+                'div[data-q]'                  # Sélecteur alternatif 3
+            ]
+            
+            for selector in selectors:
+                elements = soup.select(selector)
+                if elements:
+                    paa_questions = [elem.get_text(strip=True) for elem in elements 
+                                    if elem.get_text(strip=True) and '?' in elem.get_text(strip=True)]
+                    logging.info(f"PAA extraites avec {selector}: {len(paa_questions)}")
+                    if paa_questions:
+                        break
+
+        # --- 2) Recherches associées
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
+        logging.info(f"Recherches associées extraites: {len(associated_searches)}")
+        
+        # Si aucune recherche associée trouvée, essayer d'autres sélecteurs
+        if not associated_searches:
+            # Essayer des sélecteurs alternatifs pour les recherches associées
+            alt_selectors = [
+                "div.brs_col a",                # Sélecteur alternatif 1
+                "div.card-section a",           # Sélecteur alternatif 2
+                "div#w3bYAd a"                  # Sélecteur alternatif 3
+            ]
+            
+            for selector in alt_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    associated_searches = [elem.get_text(strip=True) for elem in elements 
+                                          if elem.get_text(strip=True) and len(elem.get_text(strip=True)) < 100]
+                    logging.info(f"Recherches associées extraites avec {selector}: {len(associated_searches)}")
+                    if associated_searches:
+                        break
+
+        # --- 3) Top 10 résultats
         results = []
-        try:
-            # Essayer d'abord avec le sélecteur tF2Cxc
-            search_elements = soup.select("div.tF2Cxc")
+        
+        # Essayer d'abord avec le sélecteur original
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")
+        logging.info(f"Éléments div.MjjYud trouvés: {len(search_results)}")
+        
+        # Si peu d'éléments trouvés, essayer avec div.tF2Cxc
+        if len(search_results) < 5:
+            search_results = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")
+            logging.info(f"Éléments div.tF2Cxc trouvés: {len(search_results)}")
             
-            # Si aucun résultat, essayer avec MjjYud
-            if not search_elements:
-                search_elements = soup.select("div.MjjYud")
-            
-            # Limiter à 5 résultats
-            search_elements = search_elements[:5]
-            
-            logging.info(f"Éléments de résultats trouvés: {len(search_elements)}")
-            
-            for result in search_elements:
-                try:
-                    # Trouver le titre
-                    title_elem = result.select_one("h3")
-                    google_snippet = title_elem.get_text(strip=True) if title_elem else "Sans titre"
-                    
-                    # Trouver le lien
-                    link_elem = result.select_one("a")
-                    link = link_elem["href"] if link_elem and link_elem.has_attr("href") else ""
-                    
-                    if not link or "google.com" in link:
-                        continue
-                        
-                    domain = urlparse(link).netloc
-                    
-                    # Analyser la page
-                    page_info = analyze_page(link)
-                    
-                    result_info = {
-                        "google_snippet": google_snippet,
-                        "url": link,
-                        "domain": domain,
-                        "page_title": page_info.get("page_title", ""),
-                        "meta_description": page_info.get("meta_description", ""),
-                        "headers": page_info.get("headers", {"H1": "", "H2": []}),
-                        "word_count": page_info.get("word_count", 0),
-                        "internal_links": page_info.get("internal_links", 0),
-                        "external_links": page_info.get("external_links", 0),
-                        "media": page_info.get("media", {}),
-                        "structured_data": page_info.get("structured_data", [])
-                    }
-                    results.append(result_info)
-                except Exception as e:
-                    logging.warning(f"Erreur lors de l'analyse d'un résultat: {str(e)}")
+        # Limiter à 10 résultats maximum
+        search_results = search_results[:10]
+
+        for element in search_results:
+            try:
+                # Trouver le lien et le snippet
+                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
+
+                # Ignorer les liens Google
+                if "google.com" in link:
                     continue
-        except Exception as e:
-            logging.warning(f"Erreur lors de l'extraction des résultats: {str(e)}")
+                    
+                domain = urlparse(link).netloc
+
+                # Analyser la page
+                page_info = analyze_page(link)
+
+                result_info = {
+                    "google_snippet": google_snippet,
+                    "url": link,
+                    "domain": domain,
+                    "page_title": page_info.get("page_title", ""),
+                    "meta_description": page_info.get("meta_description", ""),
+                    "headers": page_info.get("headers", {"H1": "", "H2": []}),
+                    "word_count": page_info.get("word_count", 0),
+                    "internal_links": page_info.get("internal_links", 0),
+                    "external_links": page_info.get("external_links", 0),
+                    "media": page_info.get("media", {}),
+                    "structured_data": page_info.get("structured_data", [])
+                }
+                results.append(result_info)
+            except Exception as e:
+                logging.warning(f"Élément ignoré : {str(e)}")
+                continue
 
         # Éviter les doublons entre PAA et recherches associées
         paa_questions = [q for q in paa_questions if q not in associated_searches]
@@ -267,11 +353,8 @@ def scrape_google_fr():
 
     finally:
         if driver:
-            try:
-                driver.quit()
-                logging.info("Fermeture du navigateur réussie.")
-            except Exception as e:
-                logging.warning(f"Erreur lors de la fermeture du navigateur: {str(e)}")
+            driver.quit()
+            logging.info("Fermeture du navigateur.")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
