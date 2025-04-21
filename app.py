@@ -11,14 +11,13 @@ import logging
 import traceback
 from urllib.parse import urlparse
 import json
-import os
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
 def analyze_page(url):
     try:
+        logging.info(f"Analyse de la page : {url}")
         resp = requests.get(url, timeout=10)
         time.sleep(1)
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -35,10 +34,8 @@ def analyze_page(url):
         word_count = len(soup.get_text().split())
 
         page_domain = urlparse(url).netloc
-        internal_count = 0
-        external_count = 0
-        links = soup.find_all('a', href=True)
-        for link in links:
+        internal_count, external_count = 0, 0
+        for link in soup.find_all('a', href=True):
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
@@ -62,7 +59,6 @@ def analyze_page(url):
                             structured_data_types.append(item.get("@type", "Unknown"))
             except Exception as e:
                 logging.debug(f"Erreur parsing JSON-LD : {e}")
-                continue
 
         return {
             "url": url,
@@ -85,7 +81,6 @@ def analyze_page(url):
         logging.error(f"Erreur d'analyse de {url}: {str(e)}")
         return {"error": str(e)}
 
-
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -97,11 +92,14 @@ def get_driver():
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
     chrome_options.binary_location = "/usr/bin/chromium"
 
-    service = Service(executable_path="/usr/bin/chromedriver", service_args=["--verbose"])
+    service = Service(
+        executable_path="/usr/bin/chromedriver",
+        service_args=["--verbose"]
+    )
+
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(60)
     return driver
-
 
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
@@ -113,29 +111,22 @@ def scrape_google_fr():
     try:
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
-
         driver.get(f"https://www.google.com/search?q={query}&gl=fr")
-        WebDriverWait(driver, 30).until(lambda d: d.find_element(By.TAG_NAME, "body").text != "")
-        time.sleep(3)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
+
+        logging.info(f"Titre de la page : {driver.title}")
 
         html = driver.page_source
-
-        # Save HTML for debugging
-        with open("debug_output.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        driver.save_screenshot("debug_screenshot.png")
+        if "verify you're not a robot" in html or "Before you continue to Google" in html:
+            logging.warning("Captcha détecté !")
+            return jsonify({"error": "Captcha détecté par Google", "code": 429}), 429
 
         soup = BeautifulSoup(html, 'html.parser')
 
         paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
-        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.B2VR9.CJHX3e")]
 
-        search_results = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")[:10]
         results = []
-
-        for element in search_results:
+        for element in driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")[:10]:
             try:
                 link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
                 snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
@@ -144,7 +135,7 @@ def scrape_google_fr():
                 domain = urlparse(link).netloc
                 page_info = analyze_page(link)
 
-                result_info = {
+                results.append({
                     "google_snippet": google_snippet,
                     "url": link,
                     "domain": domain,
@@ -156,8 +147,7 @@ def scrape_google_fr():
                     "external_links": page_info["external_links"],
                     "media": page_info["media"],
                     "structured_data": page_info["structured_data"]
-                }
-                results.append(result_info)
+                })
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
@@ -177,7 +167,6 @@ def scrape_google_fr():
         if driver:
             driver.quit()
             logging.info("Fermeture du navigateur.")
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
