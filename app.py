@@ -13,7 +13,6 @@ import logging
 import traceback
 from urllib.parse import urlparse
 import json
-import re
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -161,79 +160,44 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Utiliser Google.com avec les paramètres pour la France
-        driver.get(f"https://www.google.com/search?q={query}&gl=fr&hl=fr&pws=0")
+        # Utiliser Google.com avec paramètres français
+        driver.get(f"https://www.google.com/search?q={query}&gl=fr&hl=fr")
 
         WebDriverWait(driver, 30).until(
             lambda d: d.find_element(By.TAG_NAME, "body").text != ""
         )
-        time.sleep(3)
+        time.sleep(2)
         
-        # Scroll progressif pour charger tout le contenu
+        # Scroll pour charger tout le contenu
         driver.execute_script("window.scrollTo(0, 300);")
-        time.sleep(1)
+        time.sleep(0.5)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
-        
-        # Remonter pour voir les PAA
-        driver.execute_script("window.scrollTo(0, 300);")
-        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, 300);") # Revenir aux PAA
+        time.sleep(0.5)
 
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
 
-        # --- PAA - essayer différents sélecteurs
-        paa_questions = []
-        
-        # Méthode 1: sélecteur original
-        paa_spans = soup.select('span.CSkcDe')
-        if paa_spans:
-            paa_questions = [span.get_text(strip=True) for span in paa_spans if span.get_text(strip=True)]
-        
-        # Méthode 2: sélecteurs alternatifs si la méthode 1 échoue
-        if not paa_questions:
-            paa_elements = soup.select('div[jsname][role="button"], div.related-question-pair')
-            paa_questions = [elem.get_text(strip=True) for elem in paa_elements 
-                           if elem.get_text(strip=True) and '?' in elem.get_text(strip=True)]
-        
-        # Méthode 3: utiliser JavaScript
-        if not paa_questions:
-            try:
-                js_paa = driver.execute_script("""
-                    return Array.from(document.querySelectorAll('div[jsname][role="button"], div.related-question-pair, [data-q]'))
-                        .filter(el => el.textContent.includes('?'))
-                        .map(el => el.textContent.trim())
-                        .filter(text => text.length > 10 && text.length < 200);
-                """)
-                
-                if js_paa:
-                    paa_questions = js_paa
-            except Exception as e:
-                logging.warning(f"Erreur lors de l'extraction JavaScript des PAA: {str(e)}")
+        # --- 1) Extraction des PAA (People Also Ask) ---
+        # Chaque question se trouve dans un <span class="CSkcDe"> d'après votre inspection
+        paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
 
-        # --- Recherches associées
-        associated_searches = []
-        
-        # Méthode 1: sélecteur original
-        elements = soup.select("div.y6Uyqe div.B2VR9.CJHX3e")
-        if elements:
-            associated_searches = [elem.get_text(strip=True) for elem in elements]
-        
-        # Méthode 2: recherche par texte si la méthode 1 échoue
-        if not associated_searches:
-            for heading in soup.find_all(['h2', 'h3', 'div']):
-                if 'recherches associées' in heading.get_text().lower() or 'related searches' in heading.get_text().lower():
-                    parent = heading.parent
-                    for _ in range(3):
-                        if parent and parent.find_all('a'):
-                            associated_searches = [a.get_text(strip=True) for a in parent.find_all('a')
-                                                 if a.get_text(strip=True) and len(a.get_text(strip=True)) < 100]
-                            break
-                        if parent:
-                            parent = parent.parent
+        # --- 2) Extraction des recherches associées ---
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
 
-        # --- Top 10
-        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
+        # --- 3) Extraction du Top 10 ---
+        # Vous avez mentionné div.tF2Cxc mais votre code utilise div.MjjYud
+        # Essayons d'abord div.tF2Cxc
+        search_elements = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")
+        
+        # Si aucun résultat avec tF2Cxc, utiliser MjjYud comme dans votre code original
+        if not search_elements or len(search_elements) < 3:
+            search_elements = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")
+            
+        # Limiter à 10 résultats
+        search_results = search_elements[:10] if search_elements else []
+        
         results = []
 
         for element in search_results:
@@ -248,7 +212,7 @@ def scrape_google_fr():
 
                 result_info = {
                     "google_snippet": google_snippet,
-                    "url": link,  # ➜ Ajout de l'URL complète ici aussi
+                    "url": link,
                     "domain": domain,
                     "page_title": page_info["page_title"],
                     "meta_description": page_info["meta_description"],
