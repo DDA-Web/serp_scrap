@@ -123,7 +123,7 @@ def get_driver():
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
     chrome_options.binary_location = "/usr/bin/chromium"
 
     service = Service(
@@ -161,161 +161,264 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Désactiver JavaScript pour plus de stabilité
-        driver.execute_cdp_cmd("Emulation.setScriptExecutionDisabled", {"value": True})
-        
         # Charger Google avec des paramètres spécifiques
-        driver.get(f"https://www.google.com/search?q={query}&gl=fr&hl=fr&pws=0")
-
+        google_url = f"https://www.google.com/search?q={query}&gl=fr&hl=fr&pws=0"
+        driver.get(google_url)
+        
         # Attendre que la page se charge
         WebDriverWait(driver, 30).until(
             lambda d: d.find_element(By.TAG_NAME, "body").text != ""
         )
         
-        # Réactiver JavaScript et recharger la page
-        driver.execute_cdp_cmd("Emulation.setScriptExecutionDisabled", {"value": False})
-        driver.refresh()
+        # Pour assurer que tout le contenu est chargé
         time.sleep(3)
         
         # Scroll pour charger plus de contenu
-        for _ in range(3):
-            driver.execute_script("window.scrollTo(0, window.scrollY + 1000);")
+        for i in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 4 * {});".format(i + 1))
             time.sleep(1)
         
+        # Retourner en haut et défiler lentement pour charger les PAA
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, 500);")
+        time.sleep(1)
+        
+        # --- PAA: approche multi-méthodes
+        paa_questions = []
+        
+        # 1. Méthode JavaScript (la plus robuste face aux changements)
+        try:
+            js_paa_questions = driver.execute_script("""
+                return Array.from(document.querySelectorAll('div[jsname][role="button"], div.related-question-pair, [data-q], div[data-ved][role="button"]'))
+                    .filter(el => el.textContent.includes('?'))
+                    .map(el => el.textContent.trim())
+                    .filter(text => text.length > 10 && text.length < 200);
+            """)
+            
+            if js_paa_questions and len(js_paa_questions) > 0:
+                paa_questions = js_paa_questions
+        except Exception as e:
+            logging.warning(f"Erreur lors de l'extraction JavaScript des PAA: {str(e)}")
+        
+        # 2. Méthode XPath (plus spécifique)
+        if not paa_questions:
+            try:
+                xpath_elements = driver.find_elements(By.XPATH, '//div[@jsname and @role="button" and contains(., "?")]')
+                if not xpath_elements:
+                    xpath_elements = driver.find_elements(By.XPATH, '//div[@data-ved and @role="button" and contains(., "?")]')
+                if not xpath_elements:
+                    xpath_elements = driver.find_elements(By.XPATH, '//div[contains(@class, "related-question") and contains(., "?")]')
+                
+                paa_questions = [elem.text.strip() for elem in xpath_elements 
+                               if elem.text.strip() and elem.text.strip().endswith('?') 
+                               and len(elem.text.strip()) > 10 and len(elem.text.strip()) < 200]
+            except Exception as e:
+                logging.warning(f"Erreur lors de l'extraction XPath des PAA: {str(e)}")
+        
+        # 3. Méthode BeautifulSoup pour analyse plus approfondie
+        if not paa_questions:
+            try:
+                html = driver.page_source
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Chercher des divs avec rôle de bouton
+                button_divs = soup.find_all('div', attrs={'role': 'button'})
+                for div in button_divs:
+                    text = div.get_text(strip=True)
+                    if text and text.endswith('?') and 10 < len(text) < 200:
+                        paa_questions.append(text)
+                
+                # Chercher par motifs typiques des PAA
+                if not paa_questions:
+                    for element in soup.find_all(['div', 'span']):
+                        # Chercher des attributs qui sont souvent présents dans les PAA
+                        if (element.has_attr('jsname') or element.has_attr('data-ved') or 
+                            ('related' in element.get('class', [])) or 
+                            element.has_attr('data-q')):
+                            
+                            text = element.get_text(strip=True)
+                            if text and text.endswith('?') and 10 < len(text) < 200:
+                                paa_questions.append(text)
+            except Exception as e:
+                logging.warning(f"Erreur lors de l'extraction BeautifulSoup des PAA: {str(e)}")
+        
+        # --- Recherches associées
+        associated_searches = []
+        
+        # 1. Utiliser JavaScript pour trouver les recherches associées
+        try:
+            js_searches = driver.execute_script("""
+                // Chercher les sections qui contiennent "Recherches associées"
+                let sections = Array.from(document.querySelectorAll('h3, h2, div')).filter(
+                    el => el.textContent.toLowerCase().includes('recherches associées') || 
+                          el.textContent.toLowerCase().includes('related searches')
+                );
+                
+                if (sections.length > 0) {
+                    // Trouver les liens dans le parent ou les frères suivants
+                    let links = [];
+                    sections.forEach(section => {
+                        // Chercher dans le parent
+                        let parent = section.parentElement;
+                        for (let i = 0; i < 5 && parent; i++) {
+                            let parentLinks = Array.from(parent.querySelectorAll('a')).filter(
+                                a => a.textContent.trim().length > 0 && 
+                                     a.textContent.trim().length < 100 && 
+                                     !a.href.includes('#')
+                            ).map(a => a.textContent.trim());
+                            
+                            links = links.concat(parentLinks);
+                            parent = parent.parentElement;
+                        }
+                        
+                        // Chercher dans les frères suivants
+                        let nextSibling = section.nextElementSibling;
+                        for (let i = 0; i < 5 && nextSibling; i++) {
+                            let siblingLinks = Array.from(nextSibling.querySelectorAll('a')).filter(
+                                a => a.textContent.trim().length > 0 && 
+                                     a.textContent.trim().length < 100 && 
+                                     !a.href.includes('#')
+                            ).map(a => a.textContent.trim());
+                            
+                            links = links.concat(siblingLinks);
+                            nextSibling = nextSibling.nextElementSibling;
+                        }
+                    });
+                    
+                    // Filtrer les doublons
+                    return [...new Set(links)];
+                }
+                
+                // Si rien n'est trouvé, essayer de trouver les liens en bas de page
+                // qui sont généralement des recherches associées
+                let allLinks = Array.from(document.querySelectorAll('a')).filter(
+                    a => a.textContent.trim().length > 0 && 
+                         a.textContent.trim().length < 100 && 
+                         !a.href.includes('#') &&
+                         !a.href.includes('google.com/search?')
+                );
+                
+                // Prendre les derniers liens (généralement en bas de page)
+                let bottomLinks = allLinks.slice(-15);
+                return bottomLinks.map(a => a.textContent.trim());
+            """)
+            
+            if js_searches and len(js_searches) > 0:
+                associated_searches = js_searches
+        except Exception as e:
+            logging.warning(f"Erreur lors de l'extraction JavaScript des recherches associées: {str(e)}")
+        
+        # 2. Utiliser XPath comme méthode alternative
+        if not associated_searches:
+            try:
+                # Chercher la section des recherches associées
+                related_sections = driver.find_elements(By.XPATH, 
+                    "//*[contains(text(), 'Recherches associées') or contains(text(), 'Related searches')]")
+                
+                if related_sections:
+                    for section in related_sections:
+                        # Trouver le conteneur parent
+                        parent_container = driver.execute_script("""
+                            var element = arguments[0];
+                            var parent = element.parentElement;
+                            for (let i = 0; i < 5 && parent; i++) {
+                                if (parent.querySelectorAll('a').length > 2) return parent;
+                                parent = parent.parentElement;
+                            }
+                            return null;
+                        """, section)
+                        
+                        if parent_container:
+                            # Trouver tous les liens dans ce conteneur
+                            links = parent_container.find_elements(By.TAG_NAME, "a")
+                            for link in links:
+                                text = link.text.strip()
+                                if text and len(text) > 3 and len(text) < 100:
+                                    associated_searches.append(text)
+            except Exception as e:
+                logging.warning(f"Erreur lors de l'extraction XPath des recherches associées: {str(e)}")
+        
+        # --- Top 10
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
         
-        # Extraction brute de tous les éléments de texte
-        full_text = soup.get_text()
+        # Utiliser le sélecteur CSS standard
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")
         
-        # --- PAA: approche basée sur le texte brut de la page
-        paa_questions = []
-        
-        # Utiliser XPath pour cibler directement les éléments PAA
-        paa_elements = driver.find_elements(By.XPATH, "//div[@jsname]//div[@role='button']")
-        for elem in paa_elements:
-            text = elem.text.strip()
-            if text and text.endswith('?') and len(text) > 10 and len(text) < 200:
-                paa_questions.append(text)
-        
-        # Si aucun PAA n'a été trouvé via XPath, chercher dans le texte
-        if not paa_questions:
-            # Recherche de questions dans le texte brut
-            potential_questions = re.findall(r'([A-Z][^.!?]*\?)', full_text)
-            for q in potential_questions:
-                q = q.strip()
-                if 10 < len(q) < 200 and q not in paa_questions:
-                    paa_questions.append(q)
-        
-        # --- Recherches associées: approche basée sur le texte et structure
-        associated_searches = []
-        
-        # Chercher d'abord par XPath les éléments de recherches associées
-        try:
-            # Trouver le bloc de recherches associées
-            related_blocks = driver.find_elements(By.XPATH, "//div[contains(., 'Recherches associées') or contains(., 'Related searches')]")
-            
-            if related_blocks:
-                # Trouver le bloc parent qui contient les liens
-                for block in related_blocks:
-                    parent_element = driver.execute_script("""
-                        var element = arguments[0];
-                        var parent = element.parentElement;
-                        while (parent && parent.tagName !== 'BODY' && parent.querySelectorAll('a').length < 3) {
-                            parent = parent.parentElement;
-                        }
-                        return parent;
-                    """, block)
-                    
-                    if parent_element:
-                        # Récupérer tous les liens dans ce bloc
-                        related_links = parent_element.find_elements(By.TAG_NAME, "a")
-                        for link in related_links:
-                            text = link.text.strip()
-                            if text and len(text) > 3 and len(text) < 100:
-                                associated_searches.append(text)
-        except Exception as e:
-            logging.warning(f"Erreur lors de l'extraction des recherches associées par XPath: {str(e)}")
-        
-        # Si aucune recherche associée n'a été trouvée, utiliser BeautifulSoup
-        if not associated_searches:
-            # Chercher toutes les sections qui pourraient contenir "Recherches associées"
-            for section in soup.find_all(['div', 'span']):
-                if 'recherches associées' in section.get_text().lower():
-                    # Trouver tous les liens dans cette section et les sections suivantes
-                    current = section
-                    for _ in range(5):  # Vérifier 5 sections
-                        if current:
-                            links = current.find_all('a')
-                            for link in links:
-                                text = link.get_text(strip=True)
-                                if text and 3 < len(text) < 100 and text not in associated_searches:
-                                    associated_searches.append(text)
-                            current = current.find_next_sibling()
-        
-        # Approche de dernier recours pour les recherches associées
-        if not associated_searches:
-            # Chercher tous les liens en bas de page qui ont un texte court
-            all_links = soup.find_all('a')
-            
-            # Filtrer les derniers liens qui pourraient être des recherches associées
-            bottom_links = all_links[-15:]  # Prendre les 15 derniers liens
-            for link in bottom_links:
-                text = link.get_text(strip=True)
-                if text and 3 < len(text) < 100 and text not in associated_searches:
-                    associated_searches.append(text)
-        
-        # --- Top 10
-        search_results = []
-        
-        # Approche 1: utiliser les sélecteurs CSS standard
-        elements = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")
-        if elements and len(elements) >= 5:
-            search_results = elements[:10]
-        
-        # Approche 2: chercher les blocs avec des titres et des liens
+        # Si aucun résultat, essayer d'autres sélecteurs communs
         if not search_results or len(search_results) < 5:
-            elements = driver.find_elements(By.XPATH, "//div[.//h3 and .//a/@href]")
-            if elements and len(elements) >= 5:
-                search_results = elements[:10]
-        
-        # Approche 3: chercher directement les liens avec des titres
-        if not search_results or len(search_results) < 5:
-            elements = driver.find_elements(By.XPATH, "//a[.//h3 or .//*[@role='heading']]")
-            if elements and len(elements) >= 5:
-                search_results = elements[:10]
+            try:
+                # Utiliser XPath pour trouver les résultats
+                search_results = driver.find_elements(By.XPATH, "//div[.//h3 and .//a[@href]]")
+            except:
+                try:
+                    # Essayer de trouver les liens principaux avec leurs parents
+                    links = driver.find_elements(By.XPATH, "//a[.//h3]")
+                    search_results = []
+                    for link in links:
+                        parent = driver.execute_script("""
+                            var link = arguments[0];
+                            return link.closest('div[data-ved], div[data-hveid]');
+                        """, link)
+                        if parent:
+                            search_results.append(parent)
+                except:
+                    logging.warning("Impossible de trouver les résultats de recherche")
         
         results = []
-        for element in search_results:
+        seen_urls = set()  # Pour éviter les doublons
+        
+        for element in (search_results[:10] if search_results else []):
             try:
-                # Trouver le lien
-                link_element = None
-                try:
-                    link_element = element.find_element(By.XPATH, ".//a[.//h3]")
-                except:
-                    try:
-                        link_element = element.find_element(By.XPATH, ".//a[.//*[@role='heading']]")
-                    except:
-                        try:
-                            link_element = element.find_element(By.TAG_NAME, "a")
-                        except:
-                            continue
+                # Trouver le lien principal
+                link = None
                 
-                link = link_element.get_attribute("href")
-                if not link or "google.com" in link:
+                try:
+                    # Essayer de trouver un lien avec un h3
+                    link_elements = element.find_elements(By.XPATH, ".//a[.//h3]")
+                    if link_elements:
+                        link = link_elements[0].get_attribute("href")
+                except:
+                    pass
+                
+                if not link:
+                    try:
+                        # Essayer de trouver un lien avec un span[role=heading]
+                        link_elements = element.find_elements(By.XPATH, ".//a[.//span[@role='heading']]")
+                        if link_elements:
+                            link = link_elements[0].get_attribute("href")
+                    except:
+                        pass
+                
+                if not link:
+                    try:
+                        # Essayer de trouver le premier lien avec href
+                        link_elements = element.find_elements(By.XPATH, ".//a[@href]")
+                        if link_elements:
+                            link = link_elements[0].get_attribute("href")
+                    except:
+                        continue
+                
+                # Vérifier si l'URL est valide et non un lien interne Google
+                if not link or "google.com" in link or link in seen_urls:
                     continue
                 
-                # Trouver le snippet
-                title_element = None
+                seen_urls.add(link)
+                
+                # Trouver le snippet (titre)
+                snippet = "Sans titre"
+                
                 try:
-                    title_element = element.find_element(By.TAG_NAME, "h3")
+                    heading = element.find_element(By.TAG_NAME, "h3")
+                    snippet = heading.text
                 except:
                     try:
-                        title_element = element.find_element(By.XPATH, ".//*[@role='heading']")
+                        heading = element.find_element(By.XPATH, ".//span[@role='heading']")
+                        snippet = heading.text
                     except:
-                        title_element = link_element
+                        pass
                 
-                snippet = title_element.text if title_element else "Sans titre"
                 domain = urlparse(link).netloc
                 
                 # Analyser la page
@@ -338,6 +441,10 @@ def scrape_google_fr():
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
+
+        # Filtrer les duplications dans les PAA
+        if paa_questions:
+            paa_questions = list(dict.fromkeys(paa_questions))
 
         return jsonify({
             "query": query,
