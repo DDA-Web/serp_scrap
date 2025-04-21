@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 
 def analyze_page(url):
     try:
-        logging.info(f"Analyse de la page : {url}")
         resp = requests.get(url, timeout=10)
         time.sleep(1)
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -26,7 +25,10 @@ def analyze_page(url):
         page_title = page_title_tag.get_text(strip=True) if page_title_tag else "Aucun <title>"
 
         meta_desc_tag = soup.find("meta", attrs={"name": "description"})
-        meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else "Aucune meta description"
+        if meta_desc_tag and meta_desc_tag.get("content"):
+            meta_description = meta_desc_tag["content"].strip()
+        else:
+            meta_description = "Aucune meta description"
 
         h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
         h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2')]
@@ -34,8 +36,10 @@ def analyze_page(url):
         word_count = len(soup.get_text().split())
 
         page_domain = urlparse(url).netloc
-        internal_count, external_count = 0, 0
-        for link in soup.find_all('a', href=True):
+        internal_count = 0
+        external_count = 0
+        links = soup.find_all('a', href=True)
+        for link in links:
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
@@ -45,26 +49,34 @@ def analyze_page(url):
         images = len(soup.find_all('img'))
         videos = len(soup.find_all('video'))
         audios = len(soup.find_all('audio'))
-        embedded_videos = len(soup.find_all('iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)))
+        embedded_videos = len(soup.find_all(
+            'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
+        ))
 
         structured_data_types = []
         for script_tag in soup.find_all("script", type="application/ld+json"):
             try:
                 json_data = json.loads(script_tag.string)
                 if isinstance(json_data, dict):
-                    structured_data_types.append(json_data.get("@type", "Unknown"))
+                    schema_type = json_data.get("@type", "Unknown")
+                    structured_data_types.append(schema_type)
                 elif isinstance(json_data, list):
                     for item in json_data:
                         if isinstance(item, dict):
-                            structured_data_types.append(item.get("@type", "Unknown"))
+                            schema_type = item.get("@type", "Unknown")
+                            structured_data_types.append(schema_type)
             except Exception as e:
                 logging.debug(f"Erreur parsing JSON-LD : {e}")
+                continue
 
         return {
             "url": url,
             "page_title": page_title,
             "meta_description": meta_description,
-            "headers": {"H1": h1, "H2": h2s},
+            "headers": {
+                "H1": h1,
+                "H2": h2s
+            },
             "word_count": word_count,
             "internal_links": internal_count,
             "external_links": external_count,
@@ -92,11 +104,7 @@ def get_driver():
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
     chrome_options.binary_location = "/usr/bin/chromium"
 
-    service = Service(
-        executable_path="/usr/bin/chromedriver",
-        service_args=["--verbose"]
-    )
-
+    service = Service(executable_path="/usr/bin/chromedriver", service_args=["--verbose"])
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(60)
     return driver
@@ -111,22 +119,29 @@ def scrape_google_fr():
     try:
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
-        driver.get(f"https://www.google.com/search?q={query}&gl=fr")
+        search_url = f"https://www.google.com/search?q={query}&gl=fr"
+        driver.get(search_url)
 
-        logging.info(f"Titre de la page : {driver.title}")
+        WebDriverWait(driver, 30).until(
+            lambda d: d.find_element(By.TAG_NAME, "body").text != ""
+        )
+        time.sleep(3)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
 
         html = driver.page_source
-        if "verify you're not a robot" in html or "Before you continue to Google" in html:
-            logging.warning("Captcha détecté !")
-            return jsonify({"error": "Captcha détecté par Google", "code": 429}), 429
-
         soup = BeautifulSoup(html, 'html.parser')
+
+        logging.info("Titre de la page : %s", soup.title.text if soup.title else "Pas de titre")
+        logging.info("Contenu HTML brut :\n%s", html[:2000])  # log partiel pour ne pas saturer les logs
 
         paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
         associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.B2VR9.CJHX3e")]
 
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")[:10]
         results = []
-        for element in driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")[:10]:
+
+        for element in search_results:
             try:
                 link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
                 snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
@@ -135,19 +150,20 @@ def scrape_google_fr():
                 domain = urlparse(link).netloc
                 page_info = analyze_page(link)
 
-                results.append({
+                result_info = {
                     "google_snippet": google_snippet,
                     "url": link,
                     "domain": domain,
-                    "page_title": page_info["page_title"],
-                    "meta_description": page_info["meta_description"],
-                    "headers": page_info["headers"],
-                    "word_count": page_info["word_count"],
-                    "internal_links": page_info["internal_links"],
-                    "external_links": page_info["external_links"],
-                    "media": page_info["media"],
-                    "structured_data": page_info["structured_data"]
-                })
+                    "page_title": page_info.get("page_title"),
+                    "meta_description": page_info.get("meta_description"),
+                    "headers": page_info.get("headers"),
+                    "word_count": page_info.get("word_count"),
+                    "internal_links": page_info.get("internal_links"),
+                    "external_links": page_info.get("external_links"),
+                    "media": page_info.get("media"),
+                    "structured_data": page_info.get("structured_data")
+                }
+                results.append(result_info)
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
