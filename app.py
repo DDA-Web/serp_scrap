@@ -123,7 +123,7 @@ def get_driver():
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
     chrome_options.binary_location = "/usr/bin/chromium"
 
     service = Service(
@@ -134,6 +134,59 @@ def get_driver():
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(60)
     return driver
+
+def extraire_paa(driver, soup):
+    """
+    Méthode robuste pour extraire les PAA
+    """
+    paa_questions = []
+    
+    # 1. Méthode originale (CSS selector)
+    paa_spans = soup.select('span.CSkcDe')
+    if paa_spans:
+        for span in paa_spans:
+            text = span.get_text(strip=True)
+            if text:
+                paa_questions.append(text)
+    
+    # 2. Méthode par JavaScript si la méthode 1 échoue
+    if not paa_questions:
+        try:
+            js_paa = driver.execute_script("""
+                // 1. Chercher les divs avec jsname et role=button
+                var paaElements = Array.from(document.querySelectorAll('div[jsname][role="button"]'))
+                    .filter(el => el.textContent.includes('?'));
+                
+                // 2. Si aucun résultat, chercher d'autres sélecteurs connus
+                if (paaElements.length === 0) {
+                    paaElements = Array.from(document.querySelectorAll('.related-question-pair, [data-q], div[data-ved][role="button"]'))
+                        .filter(el => el.textContent.includes('?'));
+                }
+                
+                return paaElements.map(el => el.textContent.trim())
+                    .filter(text => text.length > 10 && text.length < 150);
+            """)
+            
+            if js_paa:
+                for q in js_paa:
+                    if q not in paa_questions:
+                        paa_questions.append(q)
+        except Exception as e:
+            logging.warning(f"Erreur lors de l'extraction JavaScript des PAA: {str(e)}")
+    
+    # 3. Méthode par analyse de texte si les méthodes 1 et 2 échouent
+    if not paa_questions:
+        # Chercher des questions dans le texte complet
+        page_text = soup.get_text()
+        question_pattern = re.compile(r'([A-Z][^.!?]{10,150}\?)')
+        potential_questions = question_pattern.findall(page_text)
+        
+        for q in potential_questions:
+            q = q.strip()
+            if q and 10 <= len(q) <= 150 and q not in paa_questions:
+                paa_questions.append(q)
+    
+    return paa_questions
 
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
@@ -161,143 +214,88 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Charger Google avec des paramètres spécifiques
-        google_url = f"https://www.google.com/search?q={query}&gl=fr&hl=fr&pws=0"
-        driver.get(google_url)
-        
-        # Attendre que la page se charge
+        driver.get(f"https://www.google.com/search?q={query}&gl=fr&hl=fr")
+
         WebDriverWait(driver, 30).until(
             lambda d: d.find_element(By.TAG_NAME, "body").text != ""
         )
-        
-        # Pour assurer que tout le contenu est chargé
         time.sleep(2)
         
-        # Scroll pour charger plus de contenu
+        # Scroll progressif pour charger tout le contenu
         driver.execute_script("window.scrollTo(0, 300);")
-        time.sleep(1)
+        time.sleep(0.5)
         driver.execute_script("window.scrollTo(0, 600);")
-        time.sleep(1)
-        driver.execute_script("window.scrollTo(0, 900);")
+        time.sleep(0.5)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
         
-        # Récupérer le HTML complet
+        # Remonter en haut pour voir les PAA
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.5)
+        driver.execute_script("window.scrollTo(0, 300);")
+        time.sleep(0.5)
+
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
+
+        # --- PAA - utiliser notre fonction robuste
+        paa_questions = extraire_paa(driver, soup)
+
+        # --- Recherches associées - garder la méthode originale
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
         
-        # Récupérer tout le texte de la page
-        page_text = soup.get_text()
-        
-        # --- PAA: approche brute mais très robuste - chercher des questions dans le texte complet
-        paa_questions = []
-        
-        # Pattern pour trouver des questions dans le texte (commence par majuscule, se termine par ?)
-        question_pattern = re.compile(r'([A-Z][^.!?]*\?)')
-        potential_questions = question_pattern.findall(page_text)
-        
-        for q in potential_questions:
-            q = q.strip()
-            # Filtrer les questions valides (longueur entre 15 et 150 caractères)
-            if 15 <= len(q) <= 150 and not any(q.lower() in existing.lower() for existing in paa_questions):
-                paa_questions.append(q)
-        
-        # --- Associated searches
-        associated_searches = []
-        
-        # Chercher le texte "Recherches associées à"
-        related_pattern = re.compile(r'Recherches associées à|Related searches', re.IGNORECASE)
-        related_matches = related_pattern.search(page_text)
-        
-        if related_matches:
-            # Prendre tout le texte après "Recherches associées"
-            start_index = related_matches.start()
-            remaining_text = page_text[start_index:]
-            
-            # Trouver tous les liens dans cette section avec BeautifulSoup
-            related_section = soup.find(string=related_pattern)
-            if related_section:
-                # Remonter à un parent qui contient des liens
-                parent = related_section.parent
-                for _ in range(5):  # Remonter jusqu'à 5 niveaux
-                    if parent and parent.find_all('a'):
-                        break
-                    if parent:
-                        parent = parent.parent
-                
-                if parent:
-                    # Prendre tous les liens de cette section
-                    links = parent.find_all('a')
-                    associated_searches = [link.get_text(strip=True) for link in links 
-                                          if link.get_text(strip=True) and 3 <= len(link.get_text(strip=True)) <= 100]
-        
-        # Si on n'a pas trouvé de recherches associées, utiliser une approche plus générique
+        # Si aucune recherche associée n'est trouvée, essayer un sélecteur alternatif
         if not associated_searches:
-            # Récupérer les liens en bas de page qui sont souvent des recherches associées
-            all_links = soup.find_all('a')
-            # Prendre les liens en bas de page
-            bottom_links = all_links[-20:]  # Les 20 derniers liens
-            for link in bottom_links:
-                text = link.get_text(strip=True)
-                if text and 3 <= len(text) <= 100 and not any(word in text.lower() for word in ['google', 'privacy', 'terms']):
-                    associated_searches.append(text)
-        
-        # --- Top 10
-        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")
-        
-        # Si aucun résultat, essayer d'autres sélecteurs
-        if not search_results or len(search_results) < 5:
-            search_results = driver.find_elements(By.XPATH, "//div[.//h3]")
-        
+            # Chercher des éléments qui contiennent "Recherches associées"
+            related_headers = soup.find_all(string=re.compile("Recherches associées|Related searches", re.IGNORECASE))
+            if related_headers:
+                for header in related_headers:
+                    parent = header.parent
+                    # Remonter jusqu'à un parent qui contient des liens
+                    for _ in range(5):
+                        if parent and parent.find_all('a'):
+                            # Obtenir tous les liens sous cet élément
+                            links = parent.find_all('a')
+                            associated_searches = [link.get_text(strip=True) for link in links 
+                                                  if link.get_text(strip=True) and 3 <= len(link.get_text(strip=True)) <= 100]
+                            break
+                        if parent:
+                            parent = parent.parent
+
+        # --- Top 10 - garder la méthode originale
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
         results = []
-        seen_urls = set()  # Pour éviter les doublons
-        
-        for element in (search_results[:10] if search_results else []):
+
+        for element in search_results:
             try:
-                # Trouver tous les liens dans cet élément
-                links = element.find_elements(By.TAG_NAME, "a")
-                
-                # Trouver un lien valide (non Google)
-                link = None
-                for l in links:
-                    href = l.get_attribute("href")
-                    if href and "google.com" not in href and href not in seen_urls:
-                        link = href
-                        break
-                
-                if not link:
-                    continue
-                
-                seen_urls.add(link)
-                
-                # Trouver le titre/snippet
-                h3_elements = element.find_elements(By.TAG_NAME, "h3")
-                snippet = h3_elements[0].text if h3_elements else "Sans titre"
-                
+                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
+
                 domain = urlparse(link).netloc
-                
-                # Analyser la page
+
                 page_info = analyze_page(link)
-                
+
                 result_info = {
-                    "google_snippet": snippet,
-                    "url": link,
+                    "google_snippet": google_snippet,
+                    "url": link,  # ➜ Ajout de l'URL complète ici aussi
                     "domain": domain,
-                    "page_title": page_info.get("page_title", ""),
-                    "meta_description": page_info.get("meta_description", ""),
-                    "headers": page_info.get("headers", {"H1": "", "H2": []}),
-                    "word_count": page_info.get("word_count", 0),
-                    "internal_links": page_info.get("internal_links", 0),
-                    "external_links": page_info.get("external_links", 0),
-                    "media": page_info.get("media", {}),
-                    "structured_data": page_info.get("structured_data", [])
+                    "page_title": page_info["page_title"],
+                    "meta_description": page_info["meta_description"],
+                    "headers": page_info["headers"],
+                    "word_count": page_info["word_count"],
+                    "internal_links": page_info["internal_links"],
+                    "external_links": page_info["external_links"],
+                    "media": page_info["media"],
+                    "structured_data": page_info["structured_data"]
                 }
                 results.append(result_info)
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
-
-        # Limiter le nombre de questions PAA (pour éviter les faux positifs)
-        paa_questions = paa_questions[:5] if paa_questions else []
+        
+        # Éviter les doublons entre PAA et recherches associées
+        paa_questions = [q for q in paa_questions if q not in associated_searches]
 
         return jsonify({
             "query": query,
