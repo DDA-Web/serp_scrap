@@ -11,9 +11,11 @@ import logging
 import traceback
 from urllib.parse import urlparse
 import json
+import os
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+
 
 def analyze_page(url):
     try:
@@ -35,7 +37,8 @@ def analyze_page(url):
         page_domain = urlparse(url).netloc
         internal_count = 0
         external_count = 0
-        for link in soup.find_all('a', href=True):
+        links = soup.find_all('a', href=True)
+        for link in links:
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
@@ -82,6 +85,7 @@ def analyze_page(url):
         logging.error(f"Erreur d'analyse de {url}: {str(e)}")
         return {"error": str(e)}
 
+
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -98,6 +102,7 @@ def get_driver():
     driver.set_page_load_timeout(60)
     return driver
 
+
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
     query = request.args.get('query')
@@ -108,35 +113,38 @@ def scrape_google_fr():
     try:
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
-        driver.get(f"https://www.google.com/search?q={query}&gl=fr&hl=fr")
 
+        driver.get(f"https://www.google.com/search?q={query}&gl=fr")
         WebDriverWait(driver, 30).until(lambda d: d.find_element(By.TAG_NAME, "body").text != "")
         time.sleep(3)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
         html = driver.page_source
+
+        # Save HTML for debugging
+        with open("debug_output.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        driver.save_screenshot("debug_screenshot.png")
+
         soup = BeautifulSoup(html, 'html.parser')
 
-        with open("page_source.html", "w", encoding="utf-8") as f:
-            f.write(soup.prettify())
-
         paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
-        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.B2VR9.CJHX3e")]
-        search_results = soup.select("div.tF2Cxc")[:10]
+        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
 
+        search_results = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")[:10]
         results = []
+
         for element in search_results:
             try:
-                a_tag = element.select_one("a[href]")
-                link = a_tag['href'] if a_tag else None
-                snippet_elem = element.select_one("h3, span[role='heading']")
-                google_snippet = snippet_elem.get_text(strip=True) if snippet_elem else "Sans titre"
-                if not link:
-                    continue
+                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
+
                 domain = urlparse(link).netloc
                 page_info = analyze_page(link)
-                results.append({
+
+                result_info = {
                     "google_snippet": google_snippet,
                     "url": link,
                     "domain": domain,
@@ -148,7 +156,8 @@ def scrape_google_fr():
                     "external_links": page_info["external_links"],
                     "media": page_info["media"],
                     "structured_data": page_info["structured_data"]
-                })
+                }
+                results.append(result_info)
             except Exception as e:
                 logging.warning(f"Élément ignoré : {str(e)}")
                 continue
@@ -168,6 +177,7 @@ def scrape_google_fr():
         if driver:
             driver.quit()
             logging.info("Fermeture du navigateur.")
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
