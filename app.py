@@ -67,7 +67,7 @@ def detect_captcha(driver):
             "challenge",
             "verify you're human",
             "i'm not a robot",
-            "err_no_supported_proxies",
+            "err_no_supported_proxies",  # Ajout pour détecter les erreurs de proxy
             "err_proxy"
         ]
         
@@ -87,9 +87,11 @@ def detect_captcha(driver):
         captcha_logger.error(f"Erreur lors de la détection: {str(e)}")
         return False
 
-def analyze_page(url, proxy=None):
+def analyze_page(url):
     """Analyse une page web avec gestion des proxies"""
     try:
+        logging.debug(f"Début de l'analyse de la page: {url}")
+        
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -100,16 +102,20 @@ def analyze_page(url, proxy=None):
             'Cache-Control': 'max-age=0'
         }
         
+        # Configuration du proxy pour requests
+        proxy = get_proxy()
         proxies = {'http': proxy, 'https': proxy} if proxy else None
         
-        resp = requests.get(url, headers=headers, proxies=proxies, timeout=7)
+        resp = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+        logging.debug(f"Réponse HTTP: Status Code {resp.status_code}")
         
         if resp.status_code == 403:
             logging.warning(f"Erreur 403 Forbidden pour {url}")
             
+        time.sleep(random.uniform(1, 3))
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # Extraction optimisée
+        # Extrait les informations
         page_title_tag = soup.find('title')
         page_title = page_title_tag.get_text(strip=True) if page_title_tag else "Aucun <title>"
         
@@ -117,39 +123,42 @@ def analyze_page(url, proxy=None):
         meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else "Aucune meta description"
         
         h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
-        h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2', limit=10)]
+        h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2')]
         
         word_count = len(soup.get_text().split())
         
         page_domain = urlparse(url).netloc
         internal_count = 0
         external_count = 0
-        
-        for link in soup.find_all('a', href=True, limit=100):
+        links = soup.find_all('a', href=True)
+        for link in links:
             link_domain = urlparse(link['href']).netloc
             if link_domain and link_domain == page_domain:
                 internal_count += 1
             elif link_domain:
                 external_count += 1
         
-        media_counts = {
-            "images": len(soup.find_all('img', limit=50)),
-            "videos": len(soup.find_all('video', limit=10)),
-            "audios": len(soup.find_all('audio', limit=10)),
-            "embedded_videos": len(soup.find_all('iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x), limit=10))
-        }
+        images = len(soup.find_all('img'))
+        videos = len(soup.find_all('video'))
+        audios = len(soup.find_all('audio'))
+        embedded_videos = len(soup.find_all(
+            'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
+        ))
         
         structured_data_types = []
-        for script_tag in soup.find_all("script", type="application/ld+json", limit=5):
+        for script_tag in soup.find_all("script", type="application/ld+json"):
             try:
                 json_data = json.loads(script_tag.string)
                 if isinstance(json_data, dict):
-                    structured_data_types.append(json_data.get("@type", "Unknown"))
+                    schema_type = json_data.get("@type", "Unknown")
+                    structured_data_types.append(schema_type)
                 elif isinstance(json_data, list):
-                    for item in json_data[:3]:
+                    for item in json_data:
                         if isinstance(item, dict):
-                            structured_data_types.append(item.get("@type", "Unknown"))
-            except:
+                            schema_type = item.get("@type", "Unknown")
+                            structured_data_types.append(schema_type)
+            except Exception as e:
+                logging.debug(f"Erreur parsing JSON-LD : {e}")
                 continue
 
         return {
@@ -160,12 +169,18 @@ def analyze_page(url, proxy=None):
             "word_count": word_count,
             "internal_links": internal_count,
             "external_links": external_count,
-            "media": media_counts,
+            "media": {
+                "images": images,
+                "videos": videos,
+                "audios": audios,
+                "embedded_videos": embedded_videos
+            },
             "structured_data": structured_data_types
         }
 
     except Exception as e:
         logging.error(f"Erreur d'analyse de {url}: {str(e)}")
+        logging.error(traceback.format_exc())
         return {"error": str(e)}
 
 def get_driver():
@@ -175,14 +190,16 @@ def get_driver():
     try:
         options = uc.ChromeOptions()
         
-        # Configuration du proxy
+        # Configuration du proxy - IMPORTANTE: utiliser le bon format
         proxy = get_proxy()
         if proxy:
+            # Extraire les informations du proxy
             proxy_parts = proxy.replace("http://", "").split("@")
             auth = proxy_parts[0]
             server = proxy_parts[1]
             username, password = auth.split(":")
             
+            # Configurer le proxy avec authentification
             proxy_extension = f"""
             var config = {{
                 mode: "fixed_servers",
@@ -213,6 +230,7 @@ def get_driver():
             );
             """
             
+            # Créer une extension pour gérer l'authentification du proxy
             import zipfile
             import tempfile
             
@@ -366,31 +384,8 @@ def scrape_google_fr():
             associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
             logging.info(f"Recherches associées trouvées: {len(associated_searches)}")
 
-            # Différents sélecteurs pour les résultats de recherche
-            search_selectors = [
-                "div.g",             # Sélecteur standard pour les résultats
-                "div.tF2Cxc",        # Sélecteur alternatif
-                "div.hlcw0c",        # Autre sélecteur potentiel
-                "div[class*='g ']",  # Divs avec classe contenant 'g'
-                "div[data-hveid]",   # Div avec attribut data-hveid
-                "div.MjjYud"         # Sélecteur original
-            ]
-            
-            search_results = []
-            for selector in search_selectors:
-                search_results = driver.find_elements(By.CSS_SELECTOR, selector)
-                if search_results:
-                    logging.info(f"Résultats trouvés avec le sélecteur '{selector}': {len(search_results)}")
-                    break
-            
-            # Si aucun résultat n'est trouvé, essayer une approche alternative
-            if not search_results:
-                logging.warning("Aucun résultat trouvé avec les sélecteurs standards, recherche alternative")
-                # Trouver tous les éléments qui ont un h3 et un lien
-                search_results = driver.find_elements(By.XPATH, "//div[descendant::h3 and descendant::a[@href and not(contains(@href, 'google.com')) and not(contains(@href, 'javascript:'))]]")
-                logging.info(f"Résultats trouvés avec XPath alternatif: {len(search_results)}")
-            
-            search_results = search_results[:10]  # Limiter aux 10 premiers résultats
+            search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
+            logging.info(f"Résultats trouvés: {len(search_results)}")
             
             results = []
 
@@ -398,55 +393,29 @@ def scrape_google_fr():
                 try:
                     logging.debug(f"Traitement du résultat {i+1}")
                     
-                    # Essayer différentes approches pour obtenir le lien
-                    link = None
-                    try:
-                        # Rechercher un lien direct dans l'élément
-                        link_elem = element.find_element(By.CSS_SELECTOR, "a[href]")
-                        link = link_elem.get_attribute("href")
-                    except:
-                        try:
-                            # Rechercher dans les descendants
-                            link_elem = element.find_element(By.XPATH, ".//a[@href]")
-                            link = link_elem.get_attribute("href")
-                        except:
-                            logging.warning(f"Impossible de trouver le lien pour le résultat {i+1}")
-                            continue
-                    
-                    # Filtrer les liens non pertinents
-                    if not link or any(x in link for x in ["google.com", "javascript:", "accounts.google.com", "support.google.com"]):
-                        continue
-                    
-                    # Obtenir le titre/snippet
-                    snippet = ""
-                    try:
-                        snippet_elem = element.find_element(By.CSS_SELECTOR, "h3")
-                        snippet = snippet_elem.text
-                    except:
-                        try:
-                            snippet_elem = element.find_element(By.XPATH, ".//h3")
-                            snippet = snippet_elem.text
-                        except:
-                            snippet = "Sans titre"
+                    link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                    snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                    google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
 
                     domain = urlparse(link).netloc
-                    logging.debug(f"URL: {link}, Domain: {domain}, Snippet: {snippet}")
+                    logging.debug(f"URL: {link}, Domain: {domain}")
 
-                    # Analyse rapide de la page
-                    page_info = analyze_page(link, get_proxy())
+                    # Attendre un délai aléatoire avant chaque analyse de page
+                    time.sleep(random.uniform(0.5, 1.5))
+                    page_info = analyze_page(link)
 
                     result_info = {
-                        "google_snippet": snippet,
+                        "google_snippet": google_snippet,
                         "url": link,
                         "domain": domain,
-                        "page_title": page_info.get("page_title", ""),
-                        "meta_description": page_info.get("meta_description", ""),
-                        "headers": page_info.get("headers", {}),
-                        "word_count": page_info.get("word_count", 0),
-                        "internal_links": page_info.get("internal_links", 0),
-                        "external_links": page_info.get("external_links", 0),
-                        "media": page_info.get("media", {}),
-                        "structured_data": page_info.get("structured_data", [])
+                        "page_title": page_info["page_title"],
+                        "meta_description": page_info["meta_description"],
+                        "headers": page_info["headers"],
+                        "word_count": page_info["word_count"],
+                        "internal_links": page_info["internal_links"],
+                        "external_links": page_info["external_links"],
+                        "media": page_info["media"],
+                        "structured_data": page_info["structured_data"]
                     }
                     results.append(result_info)
                 except Exception as e:
