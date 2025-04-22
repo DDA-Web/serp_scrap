@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     unzip \
+    xvfb \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,8 +19,12 @@ COPY . .
 # Installer les dépendances Python
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Configurer les variables d'environnement pour Chromium
+ENV DISPLAY=:99
+ENV CHROMIUM_FLAGS="--disable-software-rasterizer --disable-dev-shm-usage"
+
 # Exposer le port 8000 (Railway mappe ce port sur l'URL publique)
 EXPOSE 8000
 
-# Lancer l'application via Gunicorn
-CMD ["gunicorn", "-b", "0.0.0.0:8000", "--timeout", "600", "app:app"]
+# Lancer l'application via Gunicorn avec Xvfb
+CMD xvfb-run --server-args="-screen 0 1024x768x24" gunicorn -b 0.0.0.0:8000 --timeout 600 app:app

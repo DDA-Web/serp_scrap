@@ -13,6 +13,8 @@ import logging
 import traceback
 from urllib.parse import urlparse
 import json
+import random
+import undetected_chromedriver as uc
 
 app = Flask(__name__)
 
@@ -25,6 +27,15 @@ logging.basicConfig(
 # Création d'un logger spécifique pour les captchas
 captcha_logger = logging.getLogger('captcha_detection')
 captcha_logger.setLevel(logging.DEBUG)
+
+# Liste d'user agents pour rotation
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
+]
 
 def detect_captcha(driver):
     """Détecte la présence d'un captcha sur la page"""
@@ -69,13 +80,24 @@ def analyze_page(url):
     try:
         logging.debug(f"Début de l'analyse de la page: {url}")
         
-        resp = requests.get(url, timeout=10)
+        # Ajouter des headers pour éviter la détection
+        headers = {
+            'User-Agent': random.choice(USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=10)
         logging.debug(f"Réponse HTTP: Status Code {resp.status_code}")
         
         if resp.status_code == 403:
             logging.warning(f"Erreur 403 Forbidden pour {url}")
             
-        time.sleep(1)  # On attend un peu (si 403 ou redirect)
+        time.sleep(random.uniform(1, 3))  # Délai aléatoire
         soup = BeautifulSoup(resp.text, 'html.parser')
 
         # --- Titre de la page
@@ -135,7 +157,7 @@ def analyze_page(url):
                 continue
 
         return {
-            "url": url,  # ➜ Ajout de l'URL complète
+            "url": url,
             "page_title": page_title,
             "meta_description": meta_description,
             "headers": {
@@ -160,28 +182,33 @@ def analyze_page(url):
         return {"error": str(e)}
 
 def get_driver():
-    """Configuration Selenium/Chromium"""
-    logging.info("Création du driver Selenium")
-    
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1280x720")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
-    chrome_options.binary_location = "/usr/bin/chromium"
-
-    service = Service(
-        executable_path="/usr/bin/chromedriver",
-        service_args=["--verbose"]
-    )
+    """Configuration Selenium/Chromium avec undetected-chromedriver"""
+    logging.info("Création du driver Selenium avec undetected-chromedriver")
     
     try:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        options = uc.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        
+        # Ajouter des préférences pour paraître plus humain
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--proxy-server='direct://'")
+        options.add_argument("--proxy-bypass-list=*")
+        options.add_argument("--start-maximized")
+        options.add_argument('--disable-infobars')
+        options.add_argument('--disable-notifications')
+        
+        # Utiliser undetected-chromedriver
+        driver = uc.Chrome(options=options, use_subprocess=True)
         driver.set_page_load_timeout(60)
+        
+        # Ajout de cookies pour paraître plus légitime
+        driver.get("https://www.google.com")
+        time.sleep(2)
+        
         logging.info("Driver créé avec succès")
         return driver
     except Exception as e:
@@ -216,10 +243,14 @@ def scrape_google_fr():
         logging.info(f"Lancement du scraping pour la requête : {query}")
         driver = get_driver()
 
-        # Navigation vers Google
+        # Navigation vers Google avec délai aléatoire
         google_url = f"https://www.google.com/search?q={query}&gl=fr"
         logging.info(f"Navigation vers : {google_url}")
+        
+        # Simulation de comportement humain
+        time.sleep(random.uniform(2, 4))
         driver.get(google_url)
+        time.sleep(random.uniform(3, 5))
 
         # Log de l'URL actuelle après navigation
         logging.info(f"URL actuelle : {driver.current_url}")
@@ -251,12 +282,16 @@ def scrape_google_fr():
             logging.error(f"Timeout lors du chargement de la page: {str(e)}")
             raise
 
-        time.sleep(3)
+        # Simulation de comportement humain
+        time.sleep(random.uniform(2, 4))
         
-        # Scroll
-        logging.debug("Exécution du scroll")
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
+        # Scroll progressif
+        for i in range(3):
+            driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight*{i/3});")
+            time.sleep(random.uniform(0.5, 1))
+        
+        # Attendre un peu après le scroll
+        time.sleep(random.uniform(1, 2))
 
         html = driver.page_source
         logging.debug(f"HTML récupéré, longueur: {len(html)} caractères")
@@ -288,11 +323,13 @@ def scrape_google_fr():
                 domain = urlparse(link).netloc
                 logging.debug(f"URL: {link}, Domain: {domain}")
 
+                # Attendre un délai aléatoire avant chaque analyse de page
+                time.sleep(random.uniform(0.5, 1.5))
                 page_info = analyze_page(link)
 
                 result_info = {
                     "google_snippet": google_snippet,
-                    "url": link,  # ➜ Ajout de l'URL complète ici aussi
+                    "url": link,
                     "domain": domain,
                     "page_title": page_info["page_title"],
                     "meta_description": page_info["meta_description"],
