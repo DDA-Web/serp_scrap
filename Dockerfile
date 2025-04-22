@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     unzip \
     xvfb \
+    xauth \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
