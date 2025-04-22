@@ -16,8 +16,6 @@ import json
 import random
 import undetected_chromedriver as uc
 import os
-import concurrent.futures
-from functools import partial
 
 app = Flask(__name__)
 
@@ -90,7 +88,7 @@ def detect_captcha(driver):
         return False
 
 def analyze_page(url, proxy=None):
-    """Analyse une page web avec gestion des proxies (optimisée)"""
+    """Analyse une page web avec gestion des proxies"""
     try:
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
@@ -171,12 +169,13 @@ def analyze_page(url, proxy=None):
         return {"error": str(e)}
 
 def get_driver():
-    """Configuration Selenium/Chromium optimisée"""
+    """Configuration Selenium/Chromium avec support proxy amélioré"""
     logging.info("Création du driver Selenium avec undetected-chromedriver et proxy")
     
     try:
         options = uc.ChromeOptions()
         
+        # Configuration du proxy
         proxy = get_proxy()
         if proxy:
             proxy_parts = proxy.replace("http://", "").split("@")
@@ -251,14 +250,21 @@ def get_driver():
         options.add_argument("--start-maximized")
         options.add_argument('--disable-infobars')
         options.add_argument('--disable-notifications')
-        options.add_argument('--disable-extensions-except=/tmp/proxy.zip')  # Only keep proxy extension
-        options.add_argument('--disable-default-apps')
-        options.add_argument('--no-first-run')
-        options.add_argument('--no-service-autorun')
+        
+        # Ajout d'un profil utilisateur pour persister les cookies
+        user_data_dir = os.path.join(os.getcwd(), 'chrome_profile')
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+        options.add_argument(f'--user-data-dir={user_data_dir}')
         
         driver = uc.Chrome(options=options, use_subprocess=True)
-        driver.set_page_load_timeout(30)
+        driver.set_page_load_timeout(60)
         
+        # Ajout de cookies pour paraître plus légitime
+        driver.get("https://www.google.com")
+        time.sleep(random.uniform(2, 4))
+        
+        logging.info("Driver créé avec succès")
         return driver
     except Exception as e:
         logging.error(f"Erreur lors de la création du driver: {str(e)}")
@@ -267,171 +273,227 @@ def get_driver():
 
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
-    """Endpoint GET pour scraper Google.fr optimisé"""
+    """Endpoint GET pour scraper Google.fr avec gestion des proxies"""
     query = request.args.get('query')
     if not query:
         logging.warning("Requête reçue sans paramètre 'query'")
         return jsonify({"error": "Paramètre 'query' requis"}), 400
 
-    driver = None
-    try:
-        logging.info(f"Lancement du scraping pour la requête : {query}")
-        driver = get_driver()
-
-        google_url = f"https://www.google.com/search?q={query}&gl=fr"
-        logging.info(f"Navigation vers : {google_url}")
-        
-        driver.get(google_url)
-        time.sleep(2)  # Attendre un peu pour le chargement
-
-        # Détection de captcha
-        if detect_captcha(driver):
-            logging.error("PROBLÈME DÉTECTÉ - Captcha ou erreur de proxy")
-            return jsonify({
-                "error": "Problème de proxy ou captcha détecté",
-                "code": 403,
-                "details": "Vérifiez la configuration des proxies"
-            }), 403
-
-        # Attendre que la page soit chargée
+    max_retries = 3
+    for attempt in range(max_retries):
+        driver = None
         try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-        except Exception as e:
-            logging.error(f"Timeout lors du chargement de la page: {str(e)}")
-            raise
+            logging.info(f"Lancement du scraping pour la requête : {query} (tentative {attempt + 1}/{max_retries})")
+            driver = get_driver()
 
-        html = driver.page_source
-        soup = BeautifulSoup(html, 'html.parser')
-
-        # Extraction optimisée
-        paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
-        logging.info(f"PAA trouvées: {len(paa_questions)}")
-
-        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
-        logging.info(f"Recherches associées trouvées: {len(associated_searches)}")
-
-        # Différents sélecteurs pour trouver les résultats de recherche
-        search_selectors = [
-            "div.MjjYud",        # Sélecteur original
-            "div.g",             # Sélecteur standard pour les résultats
-            "div.tF2Cxc",        # Sélecteur alternatif
-            "div[data-hveid]",   # Div avec attribut data-hveid
-            "div.rc",            # Ancien sélecteur
-            "div.N54PNb",        # Nouveau sélecteur potentiel
-            "div.kvH3mc",        # Autre sélecteur potentiel
-        ]
-        
-        search_results = []
-        for selector in search_selectors:
-            search_results = driver.find_elements(By.CSS_SELECTOR, selector)
-            if search_results:
-                logging.info(f"Résultats trouvés avec le sélecteur '{selector}': {len(search_results)}")
-                break
-        
-        # Si aucun résultat n'est trouvé avec les sélecteurs standards
-        if not search_results:
-            logging.warning("Aucun résultat trouvé avec les sélecteurs standards, tentative de recherche alternative")
-            # Recherche de tous les éléments avec un lien et un titre
-            search_results = driver.find_elements(By.XPATH, "//div[.//h3 and .//a[@href]]")
-            logging.info(f"Résultats trouvés avec XPath: {len(search_results)}")
-        
-        search_results = search_results[:10]  # Limiter à 10 résultats
-        
-        results = []
-        proxy = get_proxy()
-
-        for i, element in enumerate(search_results):
+            # Navigation vers Google avec délai aléatoire
+            google_url = f"https://www.google.com/search?q={query}&gl=fr"
+            logging.info(f"Navigation vers : {google_url}")
+            
+            # Simulation de comportement humain
+            time.sleep(random.uniform(2, 4))
+            
+            # Accepter les cookies si présents
             try:
-                logging.debug(f"Traitement du résultat {i+1}")
-                
-                # Essayer différentes méthodes pour obtenir le lien
-                link = None
-                try:
-                    link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
-                except:
-                    try:
-                        link = element.find_element(By.XPATH, ".//a[@href]").get_attribute("href")
-                    except:
-                        logging.warning(f"Impossible de trouver le lien pour le résultat {i+1}")
-                        continue
-                
-                # Filtrer les liens non pertinents
-                if not link or "google.com" in link or "javascript:" in link:
-                    continue
-                
-                # Obtenir le titre/snippet
-                snippet = ""
-                try:
-                    snippet_elem = element.find_element(By.CSS_SELECTOR, "h3")
-                    snippet = snippet_elem.text
-                except:
-                    try:
-                        snippet_elem = element.find_element(By.XPATH, ".//h3")
-                        snippet = snippet_elem.text
-                    except:
-                        snippet = "Sans titre"
-
-                domain = urlparse(link).netloc
-                logging.debug(f"URL: {link}, Domain: {domain}, Snippet: {snippet}")
-
-                # Analyse de la page sans attente aléatoire
-                page_info = analyze_page(link, proxy)
-
-                result_info = {
-                    "google_snippet": snippet,
-                    "url": link,
-                    "domain": domain,
-                    "page_title": page_info.get("page_title", ""),
-                    "meta_description": page_info.get("meta_description", ""),
-                    "headers": page_info.get("headers", {}),
-                    "word_count": page_info.get("word_count", 0),
-                    "internal_links": page_info.get("internal_links", 0),
-                    "external_links": page_info.get("external_links", 0),
-                    "media": page_info.get("media", {}),
-                    "structured_data": page_info.get("structured_data", [])
-                }
-                results.append(result_info)
-            except Exception as e:
-                logging.warning(f"Élément {i+1} ignoré : {str(e)}")
-                continue
-
-        response_data = {
-            "query": query,
-            "paa_questions": paa_questions,
-            "associated_searches": associated_searches,
-            "results": results
-        }
-        
-        logging.info(f"Scraping terminé avec succès. Résultats: {len(results)}")
-        return jsonify(response_data)
-
-    except Exception as e:
-        logging.error(f"ERREUR: {str(e)}")
-        logging.error(traceback.format_exc())
-        
-        if driver:
-            try:
-                screenshot_path = f"/tmp/error_screenshot_{int(time.time())}.png"
-                driver.save_screenshot(screenshot_path)
-                logging.info(f"Capture d'écran d'erreur sauvegardée : {screenshot_path}")
-                
-                logging.error(f"Titre de la page: {driver.title}")
-                logging.error(f"URL actuelle: {driver.current_url}")
+                driver.get("https://www.google.com")
+                time.sleep(2)
+                cookie_button = driver.find_element(By.XPATH, "//button[contains(., 'Accept all') or contains(., 'Tout accepter')]")
+                cookie_button.click()
+                time.sleep(1)
             except:
                 pass
-        
-        return jsonify({
-            "error": "Service temporairement indisponible",
-            "code": 503,
-            "details": str(e)
-        }), 503
+            
+            driver.get(google_url)
+            time.sleep(random.uniform(3, 5))
 
-    finally:
-        if driver:
-            driver.quit()
-            logging.info("Fermeture du navigateur.")
+            # Log de l'URL actuelle après navigation
+            logging.info(f"URL actuelle : {driver.current_url}")
+            
+            # Détection de captcha ou d'erreurs de proxy
+            if detect_captcha(driver):
+                logging.error("PROBLÈME DÉTECTÉ - Changement de proxy et nouvelle tentative")
+                
+                # Capture d'écran pour debug
+                try:
+                    screenshot_path = f"/tmp/error_screenshot_{int(time.time())}.png"
+                    driver.save_screenshot(screenshot_path)
+                    logging.info(f"Capture d'écran sauvegardée : {screenshot_path}")
+                except Exception as e:
+                    logging.error(f"Impossible de sauvegarder la capture d'écran: {str(e)}")
+                
+                if attempt < max_retries - 1:
+                    continue  # Réessayer avec un nouveau proxy
+                else:
+                    return jsonify({
+                        "error": "Problème de proxy ou captcha détecté après plusieurs tentatives",
+                        "code": 403,
+                        "details": "Vérifiez la configuration des proxies"
+                    }), 403
+
+            # Attente du chargement de la page
+            try:
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.find_element(By.TAG_NAME, "body").text != ""
+                )
+                logging.info("Page chargée avec succès")
+            except Exception as e:
+                logging.error(f"Timeout lors du chargement de la page: {str(e)}")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    raise
+
+            # Simulation de comportement humain
+            time.sleep(random.uniform(2, 4))
+            
+            # Scroll progressif
+            for i in range(3):
+                driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight*{i/3});")
+                time.sleep(random.uniform(0.5, 1))
+            
+            # Attendre un peu après le scroll
+            time.sleep(random.uniform(1, 2))
+
+            html = driver.page_source
+            logging.debug(f"HTML récupéré, longueur: {len(html)} caractères")
+            
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Extraction des données
+            paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
+            logging.info(f"PAA trouvées: {len(paa_questions)}")
+
+            associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
+            logging.info(f"Recherches associées trouvées: {len(associated_searches)}")
+
+            # Différents sélecteurs pour les résultats de recherche
+            search_selectors = [
+                "div.g",             # Sélecteur standard pour les résultats
+                "div.tF2Cxc",        # Sélecteur alternatif
+                "div.hlcw0c",        # Autre sélecteur potentiel
+                "div[class*='g ']",  # Divs avec classe contenant 'g'
+                "div[data-hveid]",   # Div avec attribut data-hveid
+                "div.MjjYud"         # Sélecteur original
+            ]
+            
+            search_results = []
+            for selector in search_selectors:
+                search_results = driver.find_elements(By.CSS_SELECTOR, selector)
+                if search_results:
+                    logging.info(f"Résultats trouvés avec le sélecteur '{selector}': {len(search_results)}")
+                    break
+            
+            # Si aucun résultat n'est trouvé, essayer une approche alternative
+            if not search_results:
+                logging.warning("Aucun résultat trouvé avec les sélecteurs standards, recherche alternative")
+                # Trouver tous les éléments qui ont un h3 et un lien
+                search_results = driver.find_elements(By.XPATH, "//div[descendant::h3 and descendant::a[@href and not(contains(@href, 'google.com')) and not(contains(@href, 'javascript:'))]]")
+                logging.info(f"Résultats trouvés avec XPath alternatif: {len(search_results)}")
+            
+            search_results = search_results[:10]  # Limiter aux 10 premiers résultats
+            
+            results = []
+
+            for i, element in enumerate(search_results):
+                try:
+                    logging.debug(f"Traitement du résultat {i+1}")
+                    
+                    # Essayer différentes approches pour obtenir le lien
+                    link = None
+                    try:
+                        # Rechercher un lien direct dans l'élément
+                        link_elem = element.find_element(By.CSS_SELECTOR, "a[href]")
+                        link = link_elem.get_attribute("href")
+                    except:
+                        try:
+                            # Rechercher dans les descendants
+                            link_elem = element.find_element(By.XPATH, ".//a[@href]")
+                            link = link_elem.get_attribute("href")
+                        except:
+                            logging.warning(f"Impossible de trouver le lien pour le résultat {i+1}")
+                            continue
+                    
+                    # Filtrer les liens non pertinents
+                    if not link or any(x in link for x in ["google.com", "javascript:", "accounts.google.com", "support.google.com"]):
+                        continue
+                    
+                    # Obtenir le titre/snippet
+                    snippet = ""
+                    try:
+                        snippet_elem = element.find_element(By.CSS_SELECTOR, "h3")
+                        snippet = snippet_elem.text
+                    except:
+                        try:
+                            snippet_elem = element.find_element(By.XPATH, ".//h3")
+                            snippet = snippet_elem.text
+                        except:
+                            snippet = "Sans titre"
+
+                    domain = urlparse(link).netloc
+                    logging.debug(f"URL: {link}, Domain: {domain}, Snippet: {snippet}")
+
+                    # Analyse rapide de la page
+                    page_info = analyze_page(link, get_proxy())
+
+                    result_info = {
+                        "google_snippet": snippet,
+                        "url": link,
+                        "domain": domain,
+                        "page_title": page_info.get("page_title", ""),
+                        "meta_description": page_info.get("meta_description", ""),
+                        "headers": page_info.get("headers", {}),
+                        "word_count": page_info.get("word_count", 0),
+                        "internal_links": page_info.get("internal_links", 0),
+                        "external_links": page_info.get("external_links", 0),
+                        "media": page_info.get("media", {}),
+                        "structured_data": page_info.get("structured_data", [])
+                    }
+                    results.append(result_info)
+                except Exception as e:
+                    logging.warning(f"Élément {i+1} ignoré : {str(e)}")
+                    logging.debug(traceback.format_exc())
+                    continue
+
+            response_data = {
+                "query": query,
+                "paa_questions": paa_questions,
+                "associated_searches": associated_searches,
+                "results": results
+            }
+            
+            logging.info(f"Scraping terminé avec succès. Résultats: {len(results)}")
+            return jsonify(response_data)
+
+        except Exception as e:
+            logging.error(f"ERREUR (tentative {attempt + 1}/{max_retries}): {str(e)}")
+            logging.error(traceback.format_exc())
+            
+            # Essaie de capturer une screenshot en cas d'erreur
+            if driver:
+                try:
+                    screenshot_path = f"/tmp/error_screenshot_{int(time.time())}.png"
+                    driver.save_screenshot(screenshot_path)
+                    logging.info(f"Capture d'écran d'erreur sauvegardée : {screenshot_path}")
+                    
+                    # Log du titre et de l'URL actuelle
+                    logging.error(f"Titre de la page: {driver.title}")
+                    logging.error(f"URL actuelle: {driver.current_url}")
+                except Exception as screenshot_error:
+                    logging.error(f"Impossible de sauvegarder la capture d'écran: {str(screenshot_error)}")
+            
+            if attempt < max_retries - 1:
+                continue
+            else:
+                return jsonify({
+                    "error": "Service temporairement indisponible après plusieurs tentatives",
+                    "code": 503,
+                    "details": str(e)
+                }), 503
+
+        finally:
+            if driver:
+                driver.quit()
+                logging.info("Fermeture du navigateur.")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
