@@ -66,23 +66,25 @@ def detect_captcha(driver):
             "recaptcha",
             "challenge",
             "verify you're human",
-            "i'm not a robot"
+            "i'm not a robot",
+            "err_no_supported_proxies",  # Ajout pour détecter les erreurs de proxy
+            "err_proxy"
         ]
         
         page_source = driver.page_source.lower()
         for indicator in captcha_indicators:
             if indicator in page_source:
-                captcha_logger.warning(f"CAPTCHA DÉTECTÉ: '{indicator}' trouvé dans la page")
+                captcha_logger.warning(f"DÉTECTION: '{indicator}' trouvé dans la page")
                 return True
         
         title = driver.title.lower()
         if any(indicator in title for indicator in captcha_indicators):
-            captcha_logger.warning(f"CAPTCHA DÉTECTÉ dans le titre: {driver.title}")
+            captcha_logger.warning(f"DÉTECTION dans le titre: {driver.title}")
             return True
             
         return False
     except Exception as e:
-        captcha_logger.error(f"Erreur lors de la détection de captcha: {str(e)}")
+        captcha_logger.error(f"Erreur lors de la détection: {str(e)}")
         return False
 
 def analyze_page(url):
@@ -182,27 +184,90 @@ def analyze_page(url):
         return {"error": str(e)}
 
 def get_driver():
-    """Configuration Selenium/Chromium avec support proxy"""
+    """Configuration Selenium/Chromium avec support proxy amélioré"""
     logging.info("Création du driver Selenium avec undetected-chromedriver et proxy")
     
     try:
         options = uc.ChromeOptions()
+        
+        # Configuration du proxy - IMPORTANTE: utiliser le bon format
+        proxy = get_proxy()
+        if proxy:
+            # Extraire les informations du proxy
+            proxy_parts = proxy.replace("http://", "").split("@")
+            auth = proxy_parts[0]
+            server = proxy_parts[1]
+            username, password = auth.split(":")
+            
+            # Configurer le proxy avec authentification
+            proxy_extension = f"""
+            var config = {{
+                mode: "fixed_servers",
+                rules: {{
+                    singleProxy: {{
+                        scheme: "http",
+                        host: "{server.split(':')[0]}",
+                        port: parseInt("{server.split(':')[1]}")
+                    }},
+                    bypassList: ["localhost"]
+                }}
+            }};
+            chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+            
+            function callbackFn(details) {{
+                return {{
+                    authCredentials: {{
+                        username: "{username}",
+                        password: "{password}"
+                    }}
+                }};
+            }}
+            
+            chrome.webRequest.onAuthRequired.addListener(
+                callbackFn,
+                {{urls: ["<all_urls>"]}},
+                ['blocking']
+            );
+            """
+            
+            # Créer une extension pour gérer l'authentification du proxy
+            import zipfile
+            import tempfile
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as proxy_zip:
+                with zipfile.ZipFile(proxy_zip.name, 'w') as zp:
+                    zp.writestr("manifest.json", json.dumps({
+                        "version": "1.0.0",
+                        "manifest_version": 2,
+                        "name": "Chrome Proxy",
+                        "permissions": [
+                            "proxy",
+                            "tabs",
+                            "unlimitedStorage",
+                            "storage",
+                            "<all_urls>",
+                            "webRequest",
+                            "webRequestBlocking"
+                        ],
+                        "background": {
+                            "scripts": ["background.js"]
+                        },
+                        "minimum_chrome_version": "22.0.0"
+                    }))
+                    zp.writestr("background.js", proxy_extension)
+                
+                options.add_extension(proxy_zip.name)
+            
+            logging.info(f"Utilisation du proxy: {proxy}")
+        
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-gpu")
-        options.add_argument("--disable-extensions")
         options.add_argument("--start-maximized")
         options.add_argument('--disable-infobars')
         options.add_argument('--disable-notifications')
-        
-        # Configuration du proxy
-        proxy = get_proxy()
-        if proxy:
-            proxy_url = proxy.replace("http://", "")
-            options.add_argument(f'--proxy-server=http://{proxy_url}')
-            logging.info(f"Utilisation du proxy: {proxy}")
         
         # Ajout d'un profil utilisateur pour persister les cookies
         user_data_dir = os.path.join(os.getcwd(), 'chrome_profile')
@@ -262,13 +327,13 @@ def scrape_google_fr():
             # Log de l'URL actuelle après navigation
             logging.info(f"URL actuelle : {driver.current_url}")
             
-            # Détection de captcha
+            # Détection de captcha ou d'erreurs de proxy
             if detect_captcha(driver):
-                logging.error("CAPTCHA DÉTECTÉ - Changement de proxy et nouvelle tentative")
+                logging.error("PROBLÈME DÉTECTÉ - Changement de proxy et nouvelle tentative")
                 
                 # Capture d'écran pour debug
                 try:
-                    screenshot_path = f"/tmp/captcha_screenshot_{int(time.time())}.png"
+                    screenshot_path = f"/tmp/error_screenshot_{int(time.time())}.png"
                     driver.save_screenshot(screenshot_path)
                     logging.info(f"Capture d'écran sauvegardée : {screenshot_path}")
                 except Exception as e:
@@ -278,9 +343,9 @@ def scrape_google_fr():
                     continue  # Réessayer avec un nouveau proxy
                 else:
                     return jsonify({
-                        "error": "Captcha détecté après plusieurs tentatives",
+                        "error": "Problème de proxy ou captcha détecté après plusieurs tentatives",
                         "code": 403,
-                        "details": "Google a détecté une activité automatisée malgré les proxies"
+                        "details": "Vérifiez la configuration des proxies"
                     }), 403
 
             # Attente du chargement de la page
