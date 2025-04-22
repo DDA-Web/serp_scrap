@@ -15,12 +15,13 @@ from urllib.parse import urlparse
 import json
 import random
 import undetected_chromedriver as uc
+import os
 
 app = Flask(__name__)
 
 # Configuration du logging plus détaillée
 logging.basicConfig(
-    level=logging.DEBUG,  # Changé à DEBUG pour plus de détails
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
@@ -37,10 +38,29 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
 ]
 
+# Liste de proxies Decodo
+PROXIES = [
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10001",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10002",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10003",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10004",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10005",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10006",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10007",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10008",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10009",
+    "http://spjb20unmv:oDTdb+Rz49ff@gate.decodo.com:10010"
+]
+
+def get_proxy():
+    """Sélectionne un proxy aléatoire de la liste"""
+    if PROXIES:
+        return random.choice(PROXIES)
+    return None
+
 def detect_captcha(driver):
     """Détecte la présence d'un captcha sur la page"""
     try:
-        # Recherche de signes de captcha
         captcha_indicators = [
             "captcha",
             "recaptcha",
@@ -55,7 +75,6 @@ def detect_captcha(driver):
                 captcha_logger.warning(f"CAPTCHA DÉTECTÉ: '{indicator}' trouvé dans la page")
                 return True
         
-        # Vérifie également si le titre de la page contient des signes de captcha
         title = driver.title.lower()
         if any(indicator in title for indicator in captcha_indicators):
             captcha_logger.warning(f"CAPTCHA DÉTECTÉ dans le titre: {driver.title}")
@@ -67,20 +86,10 @@ def detect_captcha(driver):
         return False
 
 def analyze_page(url):
-    """
-    Analyse une page web et retourne :
-     - page_title (balise <title>)
-     - meta_description (balise <meta name="description">)
-     - headers (H1, H2)
-     - word_count
-     - internal_links, external_links
-     - media
-     - structured_data (liste des @type des JSON-LD)
-    """
+    """Analyse une page web avec gestion des proxies"""
     try:
         logging.debug(f"Début de l'analyse de la page: {url}")
         
-        # Ajouter des headers pour éviter la détection
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -91,35 +100,31 @@ def analyze_page(url):
             'Cache-Control': 'max-age=0'
         }
         
-        resp = requests.get(url, headers=headers, timeout=10)
+        # Configuration du proxy pour requests
+        proxy = get_proxy()
+        proxies = {'http': proxy, 'https': proxy} if proxy else None
+        
+        resp = requests.get(url, headers=headers, proxies=proxies, timeout=10)
         logging.debug(f"Réponse HTTP: Status Code {resp.status_code}")
         
         if resp.status_code == 403:
             logging.warning(f"Erreur 403 Forbidden pour {url}")
             
-        time.sleep(random.uniform(1, 3))  # Délai aléatoire
+        time.sleep(random.uniform(1, 3))
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # --- Titre de la page
+        # Extrait les informations
         page_title_tag = soup.find('title')
         page_title = page_title_tag.get_text(strip=True) if page_title_tag else "Aucun <title>"
-        logging.debug(f"Titre de la page: {page_title}")
-
-        # --- Méta description
+        
         meta_desc_tag = soup.find("meta", attrs={"name": "description"})
-        if meta_desc_tag and meta_desc_tag.get("content"):
-            meta_description = meta_desc_tag["content"].strip()
-        else:
-            meta_description = "Aucune meta description"
-
-        # --- H1 / H2
+        meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else "Aucune meta description"
+        
         h1 = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Aucun H1"
         h2s = [tag.get_text(strip=True) for tag in soup.find_all('h2')]
-
-        # --- Nombre de mots
+        
         word_count = len(soup.get_text().split())
-
-        # --- Liens internes / externes
+        
         page_domain = urlparse(url).netloc
         internal_count = 0
         external_count = 0
@@ -130,16 +135,14 @@ def analyze_page(url):
                 internal_count += 1
             elif link_domain:
                 external_count += 1
-
-        # --- Médias
+        
         images = len(soup.find_all('img'))
         videos = len(soup.find_all('video'))
         audios = len(soup.find_all('audio'))
         embedded_videos = len(soup.find_all(
             'iframe', src=lambda x: x and ('youtube' in x or 'vimeo' in x)
         ))
-
-        # --- Données structurées : on ne prend que @type
+        
         structured_data_types = []
         for script_tag in soup.find_all("script", type="application/ld+json"):
             try:
@@ -160,10 +163,7 @@ def analyze_page(url):
             "url": url,
             "page_title": page_title,
             "meta_description": meta_description,
-            "headers": {
-                "H1": h1,
-                "H2": h2s
-            },
+            "headers": {"H1": h1, "H2": h2s},
             "word_count": word_count,
             "internal_links": internal_count,
             "external_links": external_count,
@@ -182,8 +182,8 @@ def analyze_page(url):
         return {"error": str(e)}
 
 def get_driver():
-    """Configuration Selenium/Chromium avec undetected-chromedriver"""
-    logging.info("Création du driver Selenium avec undetected-chromedriver")
+    """Configuration Selenium/Chromium avec support proxy"""
+    logging.info("Création du driver Selenium avec undetected-chromedriver et proxy")
     
     try:
         options = uc.ChromeOptions()
@@ -191,23 +191,31 @@ def get_driver():
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        
-        # Ajouter des préférences pour paraître plus humain
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
-        options.add_argument("--proxy-server='direct://'")
-        options.add_argument("--proxy-bypass-list=*")
         options.add_argument("--start-maximized")
         options.add_argument('--disable-infobars')
         options.add_argument('--disable-notifications')
         
-        # Utiliser undetected-chromedriver
+        # Configuration du proxy
+        proxy = get_proxy()
+        if proxy:
+            proxy_url = proxy.replace("http://", "")
+            options.add_argument(f'--proxy-server=http://{proxy_url}')
+            logging.info(f"Utilisation du proxy: {proxy}")
+        
+        # Ajout d'un profil utilisateur pour persister les cookies
+        user_data_dir = os.path.join(os.getcwd(), 'chrome_profile')
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+        options.add_argument(f'--user-data-dir={user_data_dir}')
+        
         driver = uc.Chrome(options=options, use_subprocess=True)
         driver.set_page_load_timeout(60)
         
         # Ajout de cookies pour paraître plus légitime
         driver.get("https://www.google.com")
-        time.sleep(2)
+        time.sleep(random.uniform(2, 4))
         
         logging.info("Driver créé avec succès")
         return driver
@@ -218,171 +226,178 @@ def get_driver():
 
 @app.route('/scrape', methods=['GET'])
 def scrape_google_fr():
-    """
-    Endpoint GET pour scraper Google.fr.
-    Récupère le top 10, PAA, recherches associées,
-    et pour chaque URL : 
-      - google_snippet (ce qui vient de la SERP)
-      - url
-      - domain
-      - page_title (de la page)
-      - meta_description (de la page)
-      - headers (H1, H2)
-      - word_count
-      - internal_links, external_links
-      - media
-      - structured_data
-    """
+    """Endpoint GET pour scraper Google.fr avec gestion des proxies"""
     query = request.args.get('query')
     if not query:
         logging.warning("Requête reçue sans paramètre 'query'")
         return jsonify({"error": "Paramètre 'query' requis"}), 400
 
-    driver = None
-    try:
-        logging.info(f"Lancement du scraping pour la requête : {query}")
-        driver = get_driver()
-
-        # Navigation vers Google avec délai aléatoire
-        google_url = f"https://www.google.com/search?q={query}&gl=fr"
-        logging.info(f"Navigation vers : {google_url}")
-        
-        # Simulation de comportement humain
-        time.sleep(random.uniform(2, 4))
-        driver.get(google_url)
-        time.sleep(random.uniform(3, 5))
-
-        # Log de l'URL actuelle après navigation
-        logging.info(f"URL actuelle : {driver.current_url}")
-        
-        # Détection de captcha
-        if detect_captcha(driver):
-            logging.error("CAPTCHA DÉTECTÉ - Scraping impossible")
-            # Capture d'écran pour debug
-            try:
-                screenshot_path = f"/tmp/captcha_screenshot_{int(time.time())}.png"
-                driver.save_screenshot(screenshot_path)
-                logging.info(f"Capture d'écran sauvegardée : {screenshot_path}")
-            except Exception as e:
-                logging.error(f"Impossible de sauvegarder la capture d'écran: {str(e)}")
-            
-            return jsonify({
-                "error": "Captcha détecté - Scraping bloqué",
-                "code": 403,
-                "details": "Google a détecté une activité automatisée"
-            }), 403
-
-        # Attente du chargement de la page
+    max_retries = 3
+    for attempt in range(max_retries):
+        driver = None
         try:
-            WebDriverWait(driver, 30).until(
-                lambda d: d.find_element(By.TAG_NAME, "body").text != ""
-            )
-            logging.info("Page chargée avec succès")
-        except Exception as e:
-            logging.error(f"Timeout lors du chargement de la page: {str(e)}")
-            raise
+            logging.info(f"Lancement du scraping pour la requête : {query} (tentative {attempt + 1}/{max_retries})")
+            driver = get_driver()
 
-        # Simulation de comportement humain
-        time.sleep(random.uniform(2, 4))
-        
-        # Scroll progressif
-        for i in range(3):
-            driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight*{i/3});")
-            time.sleep(random.uniform(0.5, 1))
-        
-        # Attendre un peu après le scroll
-        time.sleep(random.uniform(1, 2))
-
-        html = driver.page_source
-        logging.debug(f"HTML récupéré, longueur: {len(html)} caractères")
-        
-        soup = BeautifulSoup(html, 'html.parser')
-
-        # --- PAA
-        paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
-        logging.info(f"PAA trouvées: {len(paa_questions)}")
-
-        # --- Recherches associées
-        associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
-        logging.info(f"Recherches associées trouvées: {len(associated_searches)}")
-
-        # --- Top 10
-        search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
-        logging.info(f"Résultats trouvés: {len(search_results)}")
-        
-        results = []
-
-        for i, element in enumerate(search_results):
+            # Navigation vers Google avec délai aléatoire
+            google_url = f"https://www.google.com/search?q={query}&gl=fr"
+            logging.info(f"Navigation vers : {google_url}")
+            
+            # Simulation de comportement humain
+            time.sleep(random.uniform(2, 4))
+            
+            # Accepter les cookies si présents
             try:
-                logging.debug(f"Traitement du résultat {i+1}")
+                driver.get("https://www.google.com")
+                time.sleep(2)
+                cookie_button = driver.find_element(By.XPATH, "//button[contains(., 'Accept all') or contains(., 'Tout accepter')]")
+                cookie_button.click()
+                time.sleep(1)
+            except:
+                pass
+            
+            driver.get(google_url)
+            time.sleep(random.uniform(3, 5))
+
+            # Log de l'URL actuelle après navigation
+            logging.info(f"URL actuelle : {driver.current_url}")
+            
+            # Détection de captcha
+            if detect_captcha(driver):
+                logging.error("CAPTCHA DÉTECTÉ - Changement de proxy et nouvelle tentative")
                 
-                link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
-                snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
-                google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
+                # Capture d'écran pour debug
+                try:
+                    screenshot_path = f"/tmp/captcha_screenshot_{int(time.time())}.png"
+                    driver.save_screenshot(screenshot_path)
+                    logging.info(f"Capture d'écran sauvegardée : {screenshot_path}")
+                except Exception as e:
+                    logging.error(f"Impossible de sauvegarder la capture d'écran: {str(e)}")
+                
+                if attempt < max_retries - 1:
+                    continue  # Réessayer avec un nouveau proxy
+                else:
+                    return jsonify({
+                        "error": "Captcha détecté après plusieurs tentatives",
+                        "code": 403,
+                        "details": "Google a détecté une activité automatisée malgré les proxies"
+                    }), 403
 
-                domain = urlparse(link).netloc
-                logging.debug(f"URL: {link}, Domain: {domain}")
-
-                # Attendre un délai aléatoire avant chaque analyse de page
-                time.sleep(random.uniform(0.5, 1.5))
-                page_info = analyze_page(link)
-
-                result_info = {
-                    "google_snippet": google_snippet,
-                    "url": link,
-                    "domain": domain,
-                    "page_title": page_info["page_title"],
-                    "meta_description": page_info["meta_description"],
-                    "headers": page_info["headers"],
-                    "word_count": page_info["word_count"],
-                    "internal_links": page_info["internal_links"],
-                    "external_links": page_info["external_links"],
-                    "media": page_info["media"],
-                    "structured_data": page_info["structured_data"]
-                }
-                results.append(result_info)
+            # Attente du chargement de la page
+            try:
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.find_element(By.TAG_NAME, "body").text != ""
+                )
+                logging.info("Page chargée avec succès")
             except Exception as e:
-                logging.warning(f"Élément {i+1} ignoré : {str(e)}")
-                logging.debug(traceback.format_exc())
+                logging.error(f"Timeout lors du chargement de la page: {str(e)}")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    raise
+
+            # Simulation de comportement humain
+            time.sleep(random.uniform(2, 4))
+            
+            # Scroll progressif
+            for i in range(3):
+                driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight*{i/3});")
+                time.sleep(random.uniform(0.5, 1))
+            
+            # Attendre un peu après le scroll
+            time.sleep(random.uniform(1, 2))
+
+            html = driver.page_source
+            logging.debug(f"HTML récupéré, longueur: {len(html)} caractères")
+            
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Extraction des données
+            paa_questions = [span.get_text(strip=True) for span in soup.select('span.CSkcDe') if span.get_text(strip=True)]
+            logging.info(f"PAA trouvées: {len(paa_questions)}")
+
+            associated_searches = [elem.get_text(strip=True) for elem in soup.select("div.y6Uyqe div.B2VR9.CJHX3e")]
+            logging.info(f"Recherches associées trouvées: {len(associated_searches)}")
+
+            search_results = driver.find_elements(By.CSS_SELECTOR, "div.MjjYud")[:10]
+            logging.info(f"Résultats trouvés: {len(search_results)}")
+            
+            results = []
+
+            for i, element in enumerate(search_results):
+                try:
+                    logging.debug(f"Traitement du résultat {i+1}")
+                    
+                    link = element.find_element(By.CSS_SELECTOR, "a[href]").get_attribute("href")
+                    snippet_elem = element.find_element(By.CSS_SELECTOR, "h3, span[role='heading']")
+                    google_snippet = snippet_elem.text if snippet_elem else "Sans titre"
+
+                    domain = urlparse(link).netloc
+                    logging.debug(f"URL: {link}, Domain: {domain}")
+
+                    # Attendre un délai aléatoire avant chaque analyse de page
+                    time.sleep(random.uniform(0.5, 1.5))
+                    page_info = analyze_page(link)
+
+                    result_info = {
+                        "google_snippet": google_snippet,
+                        "url": link,
+                        "domain": domain,
+                        "page_title": page_info["page_title"],
+                        "meta_description": page_info["meta_description"],
+                        "headers": page_info["headers"],
+                        "word_count": page_info["word_count"],
+                        "internal_links": page_info["internal_links"],
+                        "external_links": page_info["external_links"],
+                        "media": page_info["media"],
+                        "structured_data": page_info["structured_data"]
+                    }
+                    results.append(result_info)
+                except Exception as e:
+                    logging.warning(f"Élément {i+1} ignoré : {str(e)}")
+                    logging.debug(traceback.format_exc())
+                    continue
+
+            response_data = {
+                "query": query,
+                "paa_questions": paa_questions,
+                "associated_searches": associated_searches,
+                "results": results
+            }
+            
+            logging.info(f"Scraping terminé avec succès. Résultats: {len(results)}")
+            return jsonify(response_data)
+
+        except Exception as e:
+            logging.error(f"ERREUR (tentative {attempt + 1}/{max_retries}): {str(e)}")
+            logging.error(traceback.format_exc())
+            
+            # Essaie de capturer une screenshot en cas d'erreur
+            if driver:
+                try:
+                    screenshot_path = f"/tmp/error_screenshot_{int(time.time())}.png"
+                    driver.save_screenshot(screenshot_path)
+                    logging.info(f"Capture d'écran d'erreur sauvegardée : {screenshot_path}")
+                    
+                    # Log du titre et de l'URL actuelle
+                    logging.error(f"Titre de la page: {driver.title}")
+                    logging.error(f"URL actuelle: {driver.current_url}")
+                except Exception as screenshot_error:
+                    logging.error(f"Impossible de sauvegarder la capture d'écran: {str(screenshot_error)}")
+            
+            if attempt < max_retries - 1:
                 continue
+            else:
+                return jsonify({
+                    "error": "Service temporairement indisponible après plusieurs tentatives",
+                    "code": 503,
+                    "details": str(e)
+                }), 503
 
-        response_data = {
-            "query": query,
-            "paa_questions": paa_questions,
-            "associated_searches": associated_searches,
-            "results": results
-        }
-        
-        logging.info(f"Scraping terminé avec succès. Résultats: {len(results)}")
-        return jsonify(response_data)
-
-    except Exception as e:
-        logging.error(f"ERREUR CRITIQUE: {str(e)}")
-        logging.error(traceback.format_exc())
-        
-        # Essaie de capturer une screenshot en cas d'erreur
-        if driver:
-            try:
-                screenshot_path = f"/tmp/error_screenshot_{int(time.time())}.png"
-                driver.save_screenshot(screenshot_path)
-                logging.info(f"Capture d'écran d'erreur sauvegardée : {screenshot_path}")
-                
-                # Log du titre et de l'URL actuelle
-                logging.error(f"Titre de la page: {driver.title}")
-                logging.error(f"URL actuelle: {driver.current_url}")
-            except Exception as screenshot_error:
-                logging.error(f"Impossible de sauvegarder la capture d'écran: {str(screenshot_error)}")
-        
-        return jsonify({
-            "error": "Service temporairement indisponible",
-            "code": 503,
-            "details": str(e)
-        }), 503
-
-    finally:
-        if driver:
-            driver.quit()
-            logging.info("Fermeture du navigateur.")
+        finally:
+            if driver:
+                driver.quit()
+                logging.info("Fermeture du navigateur.")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
